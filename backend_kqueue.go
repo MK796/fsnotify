@@ -888,7 +888,8 @@ func (w *kqueue) readEvents() {
 					path := filepath.Clean(event.Name)
 					if fi, err := os.Lstat(path); err == nil {
 						err := w.sendCreateIfNew(path, fi)
-						if !w.sendError(err) {
+						// Remove may close the internal watch after Lstat succeeds.
+						if !errors.Is(err, unix.EBADF) && !w.sendError(err) {
 							return
 						}
 					}
