@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,31 +29,54 @@ type kqueue struct {
 
 type (
 	watches struct {
-		mu     sync.RWMutex
-		wd     map[int]watch               // wd → watch
-		path   map[string]int              // pathname → wd
-		byDir  map[string]map[int]struct{} // dirname(path) → wd
-		seen   map[string]struct{}         // Keep track of if we know this file exists.
+		mu      sync.RWMutex
+		wd      map[int]watch               // wd → watch
+		path    map[string]int              // pathname → wd
+		byDir   map[string]map[int]struct{} // dirname(path) → wd
+		seen    map[string]struct{}         // Keep track of if we know this file exists.
 		byUser  map[string]struct{}         // Watches added with Watcher.Add()
-		recurse map[string]Op              // Root paths → Op for recursive watches
+		recurse map[string]Op               // Root paths → Op for recursive watches
 	}
 	watch struct {
-		wd       int
-		name     string
-		linkName string // In case of links; name is the target, and this is the link.
-		isDir    bool
-		dirFlags uint32
+		wd         int
+		name       string
+		linkName   string // In case of links; name is the target, and this is the link.
+		fileInfo   os.FileInfo
+		isDir      bool
+		dirFlags   uint32
+		skipRename bool
+	}
+	addState struct {
+		watches map[string]int
+		links   map[string]struct{}
+		seen    map[string]struct{}
+		byUser  map[string]struct{}
+		flags   map[int]flagState
+	}
+	flagState struct {
+		before uint32
+		after  uint32
 	}
 )
 
 func newWatches() *watches {
 	return &watches{
-		wd:     make(map[int]watch),
-		path:   make(map[string]int),
-		byDir:  make(map[string]map[int]struct{}),
-		seen:   make(map[string]struct{}),
+		wd:      make(map[int]watch),
+		path:    make(map[string]int),
+		byDir:   make(map[string]map[int]struct{}),
+		seen:    make(map[string]struct{}),
 		byUser:  make(map[string]struct{}),
 		recurse: make(map[string]Op),
+	}
+}
+
+func newAddState() *addState {
+	return &addState{
+		watches: make(map[string]int),
+		links:   make(map[string]struct{}),
+		seen:    make(map[string]struct{}),
+		byUser:  make(map[string]struct{}),
+		flags:   make(map[int]flagState),
 	}
 }
 
@@ -63,8 +85,25 @@ func (w *watches) listPaths(userOnly bool) []string {
 	defer w.mu.RUnlock()
 
 	if userOnly {
-		l := make([]string, 0, len(w.byUser))
+		paths := make(map[string]struct{}, len(w.byUser))
 		for p := range w.byUser {
+			paths[p] = struct{}{}
+		}
+		for p, fd := range w.path {
+			info, ok := w.wd[fd]
+			if !ok || !info.isDir {
+				continue
+			}
+			for root := range w.recurse {
+				if hasPathPrefix(p, root) {
+					paths[p] = struct{}{}
+					break
+				}
+			}
+		}
+
+		l := make([]string, 0, len(paths))
+		for p := range paths {
 			l = append(l, p)
 		}
 		return l
@@ -92,26 +131,48 @@ func (w *watches) watchesInDir(path string) []string {
 }
 
 // Mark path as added by the user.
-func (w *watches) addUserWatch(path string) {
+func (w *watches) addUserWatch(path string, state *addState) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if state != nil {
+		if _, exists := w.byUser[path]; !exists {
+			state.byUser[path] = struct{}{}
+		}
+	}
 	w.byUser[path] = struct{}{}
 }
 
-func (w *watches) addLink(path string, fd int) {
+func (w *watches) addLink(path string, fd int, state *addState) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if state != nil {
+		if _, exists := w.path[path]; !exists {
+			state.links[path] = struct{}{}
+		}
+		if _, exists := w.seen[path]; !exists {
+			state.seen[path] = struct{}{}
+		}
+	}
 	w.path[path] = fd
 	w.seen[path] = struct{}{}
 }
 
-func (w *watches) add(path, linkPath string, fd int, isDir bool) {
+func (w *watches) add(path, linkPath string, fd int, fi os.FileInfo, state *addState) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if state != nil {
+		state.watches[path] = fd
+	}
 	w.path[path] = fd
-	w.wd[fd] = watch{wd: fd, name: path, linkName: linkPath, isDir: isDir}
+	w.wd[fd] = watch{
+		wd:       fd,
+		name:     path,
+		linkName: linkPath,
+		fileInfo: fi,
+		isDir:    fi.IsDir(),
+	}
 
 	parent := filepath.Dir(path)
 	byDir, ok := w.byDir[parent]
@@ -180,11 +241,139 @@ func (w *watches) markSeen(path string, exists bool) {
 	}
 }
 
+func (w *watches) markSeenForAdd(path string, state *addState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if state != nil {
+		if _, exists := w.seen[path]; !exists {
+			state.seen[path] = struct{}{}
+		}
+	}
+	w.seen[path] = struct{}{}
+}
+
 func (w *watches) seenBefore(path string) bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	_, ok := w.seen[path]
 	return ok
+}
+
+func (w *watches) findRenamedDir(path string, fi os.FileInfo) (string, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	for oldPath, fd := range w.path {
+		info, ok := w.wd[fd]
+		if !ok || !info.isDir || info.fileInfo == nil || oldPath == path {
+			continue
+		}
+		if _, ok := w.byUser[oldPath]; ok {
+			continue
+		}
+		if _, ok := w.recurse[oldPath]; ok {
+			continue
+		}
+		if !w.isUnderRecurseLocked(oldPath) {
+			continue
+		}
+		if os.SameFile(info.fileInfo, fi) {
+			return oldPath, true
+		}
+	}
+	return "", false
+}
+
+func (w *watches) rebase(oldPath, newPath string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	rootFD, ok := w.path[oldPath]
+	if !ok {
+		return false
+	}
+
+	type move struct {
+		from string
+		to   string
+		fd   int
+	}
+	moved := make([]move, 0)
+	moving := make(map[string]struct{})
+	for path, fd := range w.path {
+		if hasPathPrefix(path, oldPath) {
+			moved = append(moved, move{
+				from: path,
+				to:   newPath + path[len(oldPath):],
+				fd:   fd,
+			})
+			moving[path] = struct{}{}
+		}
+	}
+	for _, move := range moved {
+		if _, exists := w.path[move.to]; exists {
+			if _, willMove := moving[move.to]; !willMove {
+				return false
+			}
+		}
+	}
+
+	seen := make([]move, 0)
+	for path := range w.seen {
+		if hasPathPrefix(path, oldPath) {
+			seen = append(seen, move{
+				from: path,
+				to:   newPath + path[len(oldPath):],
+			})
+		}
+	}
+
+	for _, move := range moved {
+		delete(w.path, move.from)
+	}
+	for _, move := range moved {
+		w.path[move.to] = move.fd
+
+		info, exists := w.wd[move.fd]
+		if exists && info.name == move.from {
+			info.name = move.to
+			if move.fd == rootFD {
+				info.skipRename = true
+			}
+			w.wd[move.fd] = info
+		}
+	}
+
+	for _, move := range seen {
+		delete(w.seen, move.from)
+	}
+	for _, move := range seen {
+		w.seen[move.to] = struct{}{}
+	}
+
+	w.byDir = make(map[string]map[int]struct{})
+	for fd, info := range w.wd {
+		parent := filepath.Dir(info.name)
+		if w.byDir[parent] == nil {
+			w.byDir[parent] = make(map[int]struct{})
+		}
+		w.byDir[parent][fd] = struct{}{}
+	}
+	return true
+}
+
+func (w *watches) consumeSkippedRename(fd int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	info, ok := w.wd[fd]
+	if !ok || !info.skipRename {
+		return false
+	}
+	info.skipRename = false
+	w.wd[fd] = info
+	return true
 }
 
 func (w *watches) isRecurseRoot(path string) bool {
@@ -197,8 +386,12 @@ func (w *watches) isRecurseRoot(path string) bool {
 func (w *watches) isUnderRecurse(path string) bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
+	return w.isUnderRecurseLocked(path)
+}
+
+func (w *watches) isUnderRecurseLocked(path string) bool {
 	for p := range w.recurse {
-		if path == p || strings.HasPrefix(path, p+"/") {
+		if hasPathPrefix(path, p) {
 			return true
 		}
 	}
@@ -291,6 +484,7 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 
 	name, recurse := recursivePath(name)
 	if recurse {
+		state := newAddState()
 		err := filepath.WalkDir(name, func(root string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -304,16 +498,19 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 			if with.sendCreate && root != name {
 				w.sendEvent(Event{Name: root, Op: Create})
 			}
-			_, err = w.addWatch(root, noteAllEvents, false)
+			_, err = w.addWatch(root, noteAllEvents, false, true, state)
 			if err != nil {
 				return err
 			}
 			if root == name {
-				w.watches.addUserWatch(root)
+				w.watches.addUserWatch(root, state)
 			}
 			return nil
 		})
 		if err != nil {
+			if rollbackErr := w.rollbackAdd(state); rollbackErr != nil {
+				return errors.Join(err, rollbackErr)
+			}
 			return err
 		}
 		w.watches.mu.Lock()
@@ -322,12 +519,69 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 		return nil
 	}
 
-	_, err := w.addWatch(name, noteAllEvents, false)
+	_, err := w.addWatch(name, noteAllEvents, false, false, nil)
 	if err != nil {
 		return err
 	}
-	w.watches.addUserWatch(name)
+	w.watches.addUserWatch(name, nil)
 	return nil
+}
+
+func (w *kqueue) rollbackAdd(state *addState) error {
+	var errs []error
+
+	w.watches.mu.Lock()
+	defer w.watches.mu.Unlock()
+
+	for path, fd := range state.watches {
+		current, exists := w.watches.path[path]
+		if !exists || current != fd {
+			continue
+		}
+
+		if err := w.register([]int{fd}, unix.EV_DELETE, 0); err != nil && !errors.Is(err, unix.EBADF) {
+			errs = append(errs, fmt.Errorf("fsnotify rollback %q: %w", path, err))
+		}
+		if err := unix.Close(fd); err != nil && !errors.Is(err, unix.EBADF) {
+			errs = append(errs, fmt.Errorf("fsnotify rollback close %q: %w", path, err))
+		}
+
+		delete(w.watches.path, path)
+		delete(w.watches.wd, fd)
+
+		parent := filepath.Dir(path)
+		delete(w.watches.byDir[parent], fd)
+		if len(w.watches.byDir[parent]) == 0 {
+			delete(w.watches.byDir, parent)
+		}
+	}
+
+	for path := range state.links {
+		if fd, exists := w.watches.path[path]; exists && fd == 0 {
+			delete(w.watches.path, path)
+		}
+	}
+	for path := range state.seen {
+		delete(w.watches.seen, path)
+	}
+	for path := range state.byUser {
+		delete(w.watches.byUser, path)
+	}
+
+	for fd, change := range state.flags {
+		info, exists := w.watches.wd[fd]
+		if !exists || info.dirFlags != change.after {
+			continue
+		}
+		if err := w.register([]int{fd}, unix.EV_ADD|unix.EV_CLEAR|unix.EV_ENABLE, change.before); err != nil {
+			errs = append(errs, fmt.Errorf("fsnotify rollback flags %q: %w", info.name, err))
+			continue
+		}
+		info.dirFlags = change.before
+		w.watches.wd[fd] = info
+	}
+
+	return errors.Join(errs...)
 }
 
 func (w *kqueue) Remove(name string) error {
@@ -345,7 +599,7 @@ func (w *kqueue) Remove(name string) error {
 		w.watches.mu.Lock()
 		var toRemove []string
 		for p := range w.watches.path {
-			if p == name || strings.HasPrefix(p, name+"/") {
+			if hasPathPrefix(p, name) {
 				toRemove = append(toRemove, p)
 			}
 		}
@@ -402,14 +656,19 @@ func (w *kqueue) WatchList() []string {
 	return w.watches.listPaths(true)
 }
 
-// Watch all events (except NOTE_EXTEND, NOTE_LINK, NOTE_REVOKE)
+// Watch all events exposed as fsnotify operations.
 const noteAllEvents = unix.NOTE_DELETE | unix.NOTE_WRITE | unix.NOTE_ATTRIB | unix.NOTE_RENAME
+
+// Directory changes are rescanned to synthesize Create events. Some kqueue
+// implementations report entry changes with NOTE_EXTEND or NOTE_LINK instead
+// of NOTE_WRITE.
+const noteDirectoryEvents = unix.NOTE_EXTEND | unix.NOTE_LINK
 
 // addWatch adds name to the watched file set; the flags are interpreted as
 // described in kevent(2).
 //
 // Returns the real path to the file which was added, with symlinks resolved.
-func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, error) {
+func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, state *addState) (string, error) {
 	if w.isClosed() {
 		return "", ErrClosed
 	}
@@ -443,7 +702,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 			if alreadyWatching {
 				// Add to watches so we don't get spurious Create events later
 				// on when we diff the directories.
-				w.watches.addLink(name, 0)
+				w.watches.addLink(name, 0, state)
 				return link, nil
 			}
 
@@ -462,6 +721,21 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 			return "", err
 		}
 		info.isDir = fi.IsDir()
+		info.fileInfo = fi
+	}
+
+	if info.isDir {
+		flags |= noteDirectoryEvents
+	}
+	if state != nil && alreadyWatching && info.isDir {
+		if _, added := state.watches[name]; !added {
+			change, tracked := state.flags[info.wd]
+			if !tracked {
+				change.before = info.dirFlags
+			}
+			change.after = flags
+			state.flags[info.wd] = change
+		}
 	}
 
 	err := w.register([]int{info.wd}, unix.EV_ADD|unix.EV_CLEAR|unix.EV_ENABLE, flags)
@@ -471,7 +745,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 	}
 
 	if !alreadyWatching {
-		w.watches.add(name, info.linkName, info.wd, info.isDir)
+		w.watches.add(name, info.linkName, info.wd, info.fileInfo, state)
 	}
 
 	// Watch the directory if it has not been watched before, or if it was
@@ -488,7 +762,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 			if info.linkName != "" {
 				d = info.linkName
 			}
-			if err := w.watchDirectoryFiles(d); err != nil {
+			if err := w.watchDirectoryFiles(d, recursive, state); err != nil {
 				return "", err
 			}
 		}
@@ -556,6 +830,13 @@ func (w *kqueue) readEvents() {
 				continue
 			}
 
+			if mask&unix.NOTE_RENAME != 0 && w.watches.consumeSkippedRename(wd) {
+				mask &^= unix.NOTE_RENAME
+				if mask == 0 {
+					continue
+				}
+			}
+
 			event := w.newEvent(path.name, path.linkName, mask)
 
 			if event.Has(Rename) || event.Has(Remove) {
@@ -563,9 +844,16 @@ func (w *kqueue) readEvents() {
 				w.watches.markSeen(event.Name, false)
 			}
 
-			if path.isDir && event.Has(Write) && !event.Has(Remove) {
-				w.dirChange(event.Name)
-			} else if !w.sendEvent(event) {
+			rescanDir := path.isDir &&
+				mask&(noteDirectoryEvents|unix.NOTE_WRITE) != 0 &&
+				!event.Has(Remove)
+			if rescanDir {
+				if !w.sendError(w.dirChange(event.Name)) {
+					return
+				}
+				event.Op &^= Write
+			}
+			if !w.sendEvent(event) {
 				return
 			}
 
@@ -640,7 +928,7 @@ func (w *kqueue) newEvent(name, linkName string, mask uint32) Event {
 }
 
 // watchDirectoryFiles to mimic inotify when adding a watch on a directory
-func (w *kqueue) watchDirectoryFiles(dirPath string) error {
+func (w *kqueue) watchDirectoryFiles(dirPath string, recursive bool, state *addState) error {
 	files, err := os.ReadDir(dirPath)
 	if err != nil {
 		return err
@@ -654,7 +942,7 @@ func (w *kqueue) watchDirectoryFiles(dirPath string) error {
 			return fmt.Errorf("%q: %w", path, err)
 		}
 
-		cleanPath, err := w.internalWatch(path, fi)
+		cleanPath, err := w.internalWatch(path, fi, recursive, state)
 		if err != nil {
 			// No permission, entry resolved to a missing target (e.g. a
 			// dangling symlink), or doesn't exist: not a problem, just skip.
@@ -668,7 +956,7 @@ func (w *kqueue) watchDirectoryFiles(dirPath string) error {
 			}
 		}
 
-		w.watches.markSeen(cleanPath, true)
+		w.watches.markSeenForAdd(cleanPath, state)
 	}
 
 	return nil
@@ -682,8 +970,9 @@ func (w *kqueue) dirChange(dir string) error {
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		// Directory no longer exists: we can ignore this safely. kqueue will
-		// still give us the correct events.
-		if errors.Is(err, os.ErrNotExist) {
+		// still give us the correct events. EBADF can occur when Remove closes
+		// an internal watch concurrently with this rescan.
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.EBADF) {
 			return nil
 		}
 		return fmt.Errorf("fsnotify.dirChange %q: %w", dir, err)
@@ -692,7 +981,7 @@ func (w *kqueue) dirChange(dir string) error {
 	for _, f := range files {
 		fi, err := f.Info()
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.EBADF) {
 				return nil
 			}
 			return fmt.Errorf("fsnotify.dirChange: %w", err)
@@ -700,8 +989,10 @@ func (w *kqueue) dirChange(dir string) error {
 
 		err = w.sendCreateIfNew(filepath.Join(dir, fi.Name()), fi)
 		if err != nil {
-			// Don't need to send an error if this file isn't readable.
-			if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, os.ErrNotExist) {
+			// Don't send an error if this entry isn't readable, no longer
+			// exists, or its internal watch was removed concurrently.
+			if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) ||
+				errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.EBADF) {
 				return nil
 			}
 			return fmt.Errorf("fsnotify.dirChange: %w", err)
@@ -713,17 +1004,32 @@ func (w *kqueue) dirChange(dir string) error {
 // Send a create event if the file isn't already being tracked, and start
 // watching this file.
 func (w *kqueue) sendCreateIfNew(path string, fi os.FileInfo) error {
-	if !w.watches.seenBefore(path) {
+	isNew := !w.watches.seenBefore(path)
+	if isNew && fi.IsDir() && w.watches.isUnderRecurse(path) {
+		if oldPath, ok := w.watches.findRenamedDir(path, fi); ok {
+			if w.watches.rebase(oldPath, path) {
+				if !w.sendEvent(Event{Name: oldPath, Op: Rename}) {
+					return nil
+				}
+				if !w.sendEvent(Event{Name: path, Op: Create}) {
+					return nil
+				}
+				return nil
+			}
+		}
+	}
+
+	if isNew {
 		if !w.sendEvent(Event{Name: path, Op: Create}) {
 			return nil
 		}
 	}
 
-	if fi.IsDir() && w.watches.isUnderRecurse(path) {
+	if isNew && fi.IsDir() && w.watches.isUnderRecurse(path) {
 		return w.addRecursiveSubdir(path)
 	}
 
-	path, err := w.internalWatch(path, fi)
+	path, err := w.internalWatch(path, fi, w.watches.isUnderRecurse(path), nil)
 	if err != nil {
 		return err
 	}
@@ -741,7 +1047,7 @@ func (w *kqueue) addRecursiveSubdir(root string) error {
 			if err != nil {
 				return err
 			}
-			cleanPath, err := w.internalWatch(path, fi)
+			cleanPath, err := w.internalWatch(path, fi, true, nil)
 			if err != nil {
 				if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) {
 					cleanPath = filepath.Clean(path)
@@ -757,27 +1063,31 @@ func (w *kqueue) addRecursiveSubdir(root string) error {
 				return nil
 			}
 		}
-		_, err = w.addWatch(path, noteAllEvents, false)
+		_, err = w.addWatch(path, noteAllEvents, false, true, nil)
 		if err != nil {
 			return err
 		}
-		if err := w.watchDirectoryFiles(path); err != nil {
+		if err := w.watchDirectoryFiles(path, true, nil); err != nil {
 			return err
 		}
 		return nil
 	})
 }
 
-func (w *kqueue) internalWatch(name string, fi os.FileInfo) (string, error) {
+func (w *kqueue) internalWatch(name string, fi os.FileInfo, recursive bool, state *addState) (string, error) {
 	if fi.IsDir() {
 		// mimic Linux providing delete events for subdirectories, but preserve
 		// the flags used if currently watching subdirectory
 		info, _ := w.watches.byPath(name)
-		return w.addWatch(name, info.dirFlags|unix.NOTE_DELETE|unix.NOTE_RENAME, true)
+		flags := info.dirFlags | unix.NOTE_DELETE | unix.NOTE_RENAME
+		if recursive {
+			flags |= noteAllEvents
+		}
+		return w.addWatch(name, flags, true, recursive, state)
 	}
 
 	// Watch file to mimic Linux inotify.
-	return w.addWatch(name, noteAllEvents, true)
+	return w.addWatch(name, noteAllEvents, true, recursive, state)
 }
 
 // Register events with the queue.
