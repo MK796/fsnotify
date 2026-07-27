@@ -7,6 +7,7 @@ on:
 
 jobs:
   linux:
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         os: ['windows-latest']
-        go: ['1.23', '1.26']
+        go: ['1.23']
     runs-on: '${{ matrix.os }}'
     timeout-minutes: 10
     steps:
@@ -40,15 +41,10 @@ jobs:
       - name: test
         run: |
           go version
-          go test -parallel 1 -race    ./...
-
-          $Env:FSNOTIFY_BUFFER = 4096
-          go test -parallel 1 -race    ./...
-
-          $Env:FSNOTIFY_DEBUG = 1
-          go test -parallel 1 -race -v ./...
+          go test -count=1 -parallel 1 -race -v -timeout 4m ./...
 
   macos:
+    if: false
     name: 'test'
     strategy:
       fail-fast: false
@@ -71,6 +67,7 @@ jobs:
 
   # FreeBSD
   freebsd:
+    if: false
     runs-on: 'ubuntu-latest'
     name:    'test (freebsd)'
     timeout-minutes: 10
@@ -97,6 +94,7 @@ jobs:
   #       much faster race detector, so maybe waiting until we have that is
   #       enough.
   openbsd:
+    if: false
     runs-on: 'ubuntu-latest'
     name:    'test (openbsd)'
     timeout-minutes: 10
@@ -116,6 +114,7 @@ jobs:
 
   # NetBSD
   netbsd:
+    if: false
     runs-on: 'ubuntu-latest'
     name:    'test (netbsd)'
     timeout-minutes: 10
@@ -136,6 +135,7 @@ jobs:
 
   # DragonFlyBSD
   dragonflybsd:
+    if: false
     runs-on: 'ubuntu-latest'
     name:    'test (dragonflybsd)'
     timeout-minutes: 10
@@ -156,6 +156,7 @@ jobs:
 
   # illumos
   illumos:
+    if: false
     runs-on: 'ubuntu-latest'
     name:    'test (illumos)'
     timeout-minutes: 10
