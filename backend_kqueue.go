@@ -25,6 +25,7 @@ type kqueue struct {
 	kq        int    // File descriptor (as returned by the kqueue() syscall).
 	closepipe [2]int // Pipe used for closing kq.
 	watches   *watches
+	fdMu      sync.Mutex // Serializes watch descriptor registration and removal.
 }
 
 type (
@@ -530,6 +531,9 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 func (w *kqueue) rollbackAdd(state *addState) error {
 	var errs []error
 
+	w.fdMu.Lock()
+	defer w.fdMu.Unlock()
+
 	w.watches.mu.Lock()
 	defer w.watches.mu.Unlock()
 
@@ -623,19 +627,10 @@ func (w *kqueue) remove(name string, unwatchFiles bool) error {
 // remove() but without checking isClosed
 func (w *kqueue) remove2(name string, unwatchFiles bool) error {
 	name = filepath.Clean(name)
-	info, ok := w.watches.byPath(name)
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
-	}
-
-	err := w.register([]int{info.wd}, unix.EV_DELETE, 0)
+	isDir, err := w.removeWatch(name)
 	if err != nil {
 		return err
 	}
-
-	unix.Close(info.wd)
-
-	isDir := w.watches.remove(info.wd, name)
 
 	// Find all watched paths that are in this directory that are not external.
 	if unwatchFiles && isDir {
@@ -647,6 +642,25 @@ func (w *kqueue) remove2(name string, unwatchFiles bool) error {
 		}
 	}
 	return nil
+}
+
+func (w *kqueue) removeWatch(name string) (bool, error) {
+	w.fdMu.Lock()
+	defer w.fdMu.Unlock()
+
+	info, ok := w.watches.byPath(name)
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
+	}
+
+	err := w.register([]int{info.wd}, unix.EV_DELETE, 0)
+	if err != nil {
+		return false, err
+	}
+
+	unix.Close(info.wd)
+	isDir := w.watches.remove(info.wd, name)
+	return isDir, nil
 }
 
 func (w *kqueue) WatchList() []string {
@@ -674,17 +688,32 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, st
 	}
 
 	name = filepath.Clean(name)
+	name, watchDir, err := w.registerWatch(name, flags, listDir, state)
+	if err != nil {
+		return "", err
+	}
+	if watchDir != "" {
+		if err := w.watchDirectoryFiles(watchDir, recursive, state); err != nil {
+			return "", err
+		}
+	}
+	return name, nil
+}
+
+func (w *kqueue) registerWatch(name string, flags uint32, listDir bool, state *addState) (string, string, error) {
+	w.fdMu.Lock()
+	defer w.fdMu.Unlock()
 
 	info, alreadyWatching := w.watches.byPath(name)
 	if !alreadyWatching {
 		fi, err := os.Lstat(name)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 
 		// Don't watch sockets or named pipes.
 		if (fi.Mode()&os.ModeSocket == os.ModeSocket) || (fi.Mode()&os.ModeNamedPipe == os.ModeNamedPipe) {
-			return "", nil
+			return "", "", nil
 		}
 
 		// Follow symlinks, but only for paths added with Add(), and not paths
@@ -692,7 +721,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, st
 		if !listDir && fi.Mode()&os.ModeSymlink == os.ModeSymlink {
 			link, err := os.Readlink(name)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 			if !filepath.IsAbs(link) {
 				link = filepath.Join(filepath.Dir(name), link)
@@ -703,14 +732,14 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, st
 				// Add to watches so we don't get spurious Create events later
 				// on when we diff the directories.
 				w.watches.addLink(name, 0, state)
-				return link, nil
+				return link, "", nil
 			}
 
 			info.linkName = name
 			name = link
 			fi, err = os.Lstat(name)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
 		}
 
@@ -718,7 +747,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, st
 			return unix.Open(name, openMode, 0)
 		})
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		info.isDir = fi.IsDir()
 		info.fileInfo = fi
@@ -740,8 +769,10 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, st
 
 	err := w.register([]int{info.wd}, unix.EV_ADD|unix.EV_CLEAR|unix.EV_ENABLE, flags)
 	if err != nil {
-		unix.Close(info.wd)
-		return "", err
+		if !alreadyWatching {
+			unix.Close(info.wd)
+		}
+		return "", "", err
 	}
 
 	if !alreadyWatching {
@@ -754,7 +785,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, st
 		watchDir := (flags&unix.NOTE_WRITE) == unix.NOTE_WRITE &&
 			(!alreadyWatching || (info.dirFlags&unix.NOTE_WRITE) != unix.NOTE_WRITE)
 		if !w.watches.updateDirFlags(name, flags) {
-			return "", nil
+			return "", "", nil
 		}
 
 		if watchDir {
@@ -762,12 +793,10 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool, st
 			if info.linkName != "" {
 				d = info.linkName
 			}
-			if err := w.watchDirectoryFiles(d, recursive, state); err != nil {
-				return "", err
-			}
+			return name, d, nil
 		}
 	}
-	return name, nil
+	return name, "", nil
 }
 
 // readEvents reads from kqueue and converts the received kevents into
