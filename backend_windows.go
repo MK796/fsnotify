@@ -127,7 +127,7 @@ func (w *readDirChangesW) AddWith(name string, opts ...addOpt) error {
 	in := &input{
 		op:      opAddWatch,
 		path:    filepath.Clean(name),
-		flags:   sysFSALLEVENTS,
+		flags:   toWindowsMask(with.op),
 		reply:   make(chan error),
 		bufsize: with.bufsize,
 	}
@@ -190,7 +190,6 @@ func (w *readDirChangesW) WatchList() []string {
 //
 // This should all be removed at some point, and just use windows.FILE_NOTIFY_*
 const (
-	sysFSALLEVENTS  = 0xfff
 	sysFSCREATE     = 0x100
 	sysFSDELETE     = 0x200
 	sysFSDELETESELF = 0x400
@@ -201,6 +200,23 @@ const (
 	sysFSMOVESELF   = 0x800
 	sysFSIGNORED    = 0x8000
 )
+
+func toWindowsMask(op Op) uint32 {
+	var mask uint32
+	if op.Has(Create) {
+		mask |= sysFSCREATE
+	}
+	if op.Has(Write) {
+		mask |= sysFSMODIFY
+	}
+	if op.Has(Remove) {
+		mask |= sysFSDELETE | sysFSDELETESELF
+	}
+	if op.Has(Rename) {
+		mask |= sysFSMOVE | sysFSMOVESELF
+	}
+	return mask
+}
 
 func (w *readDirChangesW) newEvent(name string, mask uint32) Event {
 	e := Event{Name: name}

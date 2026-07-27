@@ -83,3 +83,32 @@ func TestWindowsRemWatch(t *testing.T) {
 		t.Fatal("Should be fail with closed handle")
 	}
 }
+
+func TestWindowsMask(t *testing.T) {
+	tests := []struct {
+		name string
+		op   Op
+		want uint32
+	}{
+		{"none", 0, 0},
+		{"create", Create, sysFSCREATE},
+		{"write", Write, sysFSMODIFY},
+		{"remove", Remove, sysFSDELETE | sysFSDELETESELF},
+		{"rename", Rename, sysFSMOVE | sysFSMOVESELF},
+		{"chmod", Chmod, 0},
+		{
+			"default",
+			Create | Write | Remove | Rename | Chmod,
+			sysFSCREATE | sysFSMODIFY | sysFSDELETE | sysFSDELETESELF |
+				sysFSMOVE | sysFSMOVESELF,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toWindowsMask(tt.op); got != tt.want {
+				t.Errorf("toWindowsMask(%s) = %#x; want %#x", tt.op, got, tt.want)
+			}
+		})
+	}
+}
