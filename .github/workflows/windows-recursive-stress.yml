@@ -48,7 +48,7 @@ jobs:
           -v
           -count=10
           -shuffle=on
-          -timeout=6m
+          -timeout=90s
           -run '^TestRace$/(add_and_remove_watches|remove_self)$'
           .
       - name: Stress close lifecycle
