@@ -1,5 +1,6 @@
 # Removing an intermediate directory should not break the recursive root.
 require recurse
+ignore write
 
 mkdir -p /root/sub/deep
 watch /root/...

@@ -1,0 +1,66 @@
+name: windows recursive stress
+
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - '.github/workflows/windows-recursive-stress.yml'
+
+jobs:
+  lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - '1.23'
+          - '1.26'
+        buffer:
+          - '0'
+          - '4096'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Repeat recursive lifecycle scripts
+        env:
+          FSNOTIFY_BUFFER: ${{ matrix.buffer }}
+          GOTRACEBACK: all
+        run: >-
+          go test
+          -race
+          -v
+          -count=10
+          -shuffle=on
+          -timeout=6m
+          -run '^TestScript$/watch-recurse'
+          .
+      - name: Stress add and remove races
+        env:
+          FSNOTIFY_BUFFER: ${{ matrix.buffer }}
+          GOTRACEBACK: all
+        run: >-
+          go test
+          -race
+          -v
+          -count=10
+          -shuffle=on
+          -timeout=90s
+          -run '^TestRace$/(add_and_remove_watches|remove_self)$'
+          .
+      - name: Stress close lifecycle
+        env:
+          FSNOTIFY_BUFFER: ${{ matrix.buffer }}
+          GOTRACEBACK: all
+        run: >-
+          go test
+          -race
+          -v
+          -count=10
+          -shuffle=on
+          -timeout=6m
+          -run '^TestClose$/(close_while_removing_files|double_close)$'
+          .

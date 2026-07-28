@@ -451,6 +451,24 @@ func (w *readDirChangesW) deleteWatch(watch *watch) {
 	}
 }
 
+// Must run within the I/O thread after the watch's pending read completed.
+func (w *readDirChangesW) closeCompletedWatch(watch *watch) error {
+	handle := watch.ino.handle
+	watch.ino.handle = windows.InvalidHandle
+
+	w.mu.Lock()
+	delete(w.watches[watch.ino.volume], watch.ino.index)
+	w.mu.Unlock()
+
+	if handle == windows.InvalidHandle {
+		return nil
+	}
+	if err := windows.CloseHandle(handle); err != nil && !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return os.NewSyscallError("CloseHandle", err)
+	}
+	return nil
+}
+
 // Must run within the I/O thread.
 func (w *readDirChangesW) startRead(watch *watch) error {
 	err := windows.CancelIo(watch.ino.handle)
@@ -559,7 +577,9 @@ func (w *readDirChangesW) readEvents() {
 			// Watched directory was probably removed
 			w.sendEvent(watch.path, "", watch.mask&sysFSDELETESELF)
 			w.deleteWatch(watch)
-			w.startRead(watch)
+			if err := w.closeCompletedWatch(watch); err != nil {
+				w.sendError(err)
+			}
 			continue
 		case windows.ERROR_OPERATION_ABORTED:
 			// CancelIo was called on this handle

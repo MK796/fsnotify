@@ -1206,7 +1206,7 @@ func TestRace(t *testing.T) {
 	t.Run("remove self", func(t *testing.T) {
 		t.Parallel()
 
-		// TODO: seems to hang forever on Windows; possibly related to:
+		// This used to hang forever on Windows; possibly related to:
 		// https://github.com/fsnotify/fsnotify/issues/656
 		//
 		// Although it seems to be on different points:
@@ -1241,12 +1241,6 @@ func TestRace(t *testing.T) {
 		//   created by github.com/fsnotify/fsnotify.(*eventCollector).collect in goroutine 8
 		//          C:/Users/martin/fsnotify/helpers_test.go:427 +0x67
 		//
-		// The Windows backend hasn't really changed in a long time, so old
-		// problem, and not something we need to fix right now.
-		if runtime.GOOS == "windows" {
-			t.Skip("hangs on windows")
-		}
-
 		// TODO: sometimes hands on "unix.Close(info.wd)" in kqueue.remove().
 		// Only seems to happen on macOS and not the other kqueue platforms.
 		//

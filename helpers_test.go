@@ -483,6 +483,17 @@ func (e Events) copy() Events {
 	return cp
 }
 
+func (e Events) without(op Op) Events {
+	filtered := make(Events, 0, len(e))
+	for _, event := range e {
+		event.Op &^= op
+		if event.Op != 0 {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
 // Create a new Events list from a string; for example:
 //
 //	CREATE        path
@@ -744,6 +755,7 @@ func parseScript(t *testing.T, in string) {
 
 	var (
 		repeat  = 1
+		ignore  Op
 		do      = make([]func(*Watcher), 0, len(cmds))
 		mustArg = func(c command, n int) {
 			if len(c.args) != n {
@@ -855,6 +867,24 @@ loop:
 				do = append(do, func(w *Watcher) { debug = false })
 			default:
 				t.Fatalf("line %d: unknown debug: %q", c.line, c.args[0])
+			}
+		case "ignore":
+			atleastArg(c, 1)
+			for _, op := range c.args {
+				switch strings.ToLower(op) {
+				case "create":
+					ignore |= Create
+				case "write":
+					ignore |= Write
+				case "remove":
+					ignore |= Remove
+				case "rename":
+					ignore |= Rename
+				case "chmod":
+					ignore |= Chmod
+				default:
+					t.Fatalf("line %d: unknown ignored operation: %q", c.line, op)
+				}
 			}
 		case "stop":
 			mustArg(c, 0)
@@ -1027,8 +1057,8 @@ loop:
 		for _, d := range do {
 			d(w.w)
 		}
-		ev := w.stop(t)
-		cmpEvents(t, tmp, ev, newEvents(t, want))
+		ev := w.stop(t).without(ignore)
+		cmpEvents(t, tmp, ev, newEvents(t, want).without(ignore))
 	}
 
 	if repeat == 1 {
