@@ -134,6 +134,21 @@ func (w *watches) addOwnerTree(path, owner string, recursive bool) {
 	}
 }
 
+func (w *watches) addOwner(path, owner string) {
+	if path == "" {
+		return
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	owners := w.owners[path]
+	if owners == nil {
+		owners = make(map[string]struct{}, 1)
+		w.owners[path] = owners
+	}
+	owners[owner] = struct{}{}
+}
+
 func (w *watches) ownersFor(path string) []string {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -515,22 +530,39 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 			if err != nil {
 				return err
 			}
-			if !d.IsDir() {
+			var watched string
+			if d.IsDir() {
+				if with.sendCreate && root != name {
+					w.sendEvent(Event{Name: root, Op: Create})
+				}
+				watched, err = w.addWatch(root, noteAllEvents, false, false)
+			} else {
 				if root == name {
 					return fmt.Errorf("fsnotify: not a directory: %q", name)
 				}
-				return nil
+				fi, infoErr := d.Info()
+				if infoErr != nil {
+					return infoErr
+				}
+				watched, err = w.internalWatch(root, fi)
+				if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, os.ErrNotExist) {
+					w.watches.markSeen(filepath.Clean(root), true)
+					return nil
+				}
 			}
-			if with.sendCreate && root != name {
-				w.sendEvent(Event{Name: root, Op: Create})
-			}
-			watched, err := w.addWatch(root, noteAllEvents, false)
 			if err != nil {
 				return err
 			}
-			w.watches.addOwnerTree(watched, name, false)
+			w.watches.addOwner(watched, name)
+			if watched == "" {
+				watched = filepath.Clean(root)
+			}
+			w.watches.markSeen(watched, true)
 			if root == name {
 				w.watches.addUserWatch(root, watched)
+				w.watches.mu.Lock()
+				w.watches.recurse[name] = with.op
+				w.watches.mu.Unlock()
 			}
 			return nil
 		})
@@ -540,16 +572,10 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 			}
 			return err
 		}
-		w.watches.addOwnerTree(name, name, true)
-		w.watches.mu.Lock()
-		w.watches.byUser[name] = struct{}{}
-		w.watches.target[name] = name
-		w.watches.recurse[name] = with.op
-		w.watches.mu.Unlock()
 		return nil
 	}
 
-	watched, err := w.addWatch(name, noteAllEvents, false)
+	watched, err := w.addWatch(name, noteAllEvents, false, true)
 	if err != nil {
 		return err
 	}
@@ -672,14 +698,14 @@ const noteAllEvents = unix.NOTE_DELETE | unix.NOTE_WRITE | unix.NOTE_ATTRIB | un
 // described in kevent(2).
 //
 // Returns the real path to the file which was added, with symlinks resolved.
-func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, error) {
+func (w *kqueue) addWatch(name string, flags uint32, listDir, scanDir bool) (string, error) {
 	w.watchMu.Lock()
 	watched, watchDir, dir, err := w.addWatchDescriptor(name, flags, listDir)
 	w.watchMu.Unlock()
 	if err != nil {
 		return "", err
 	}
-	if watchDir {
+	if scanDir && watchDir {
 		if err := w.watchDirectoryFiles(dir); err != nil {
 			return "", err
 		}
@@ -1064,6 +1090,10 @@ func (w *kqueue) addRecursiveSubdir(root string, owners []string) error {
 				} else {
 					return err
 				}
+			} else {
+				for _, owner := range owners {
+					w.watches.addOwner(cleanPath, owner)
+				}
 			}
 			w.watches.markSeen(cleanPath, true)
 			return nil
@@ -1073,20 +1103,18 @@ func (w *kqueue) addRecursiveSubdir(root string, owners []string) error {
 				return nil
 			}
 		}
-		_, err = w.addWatch(path, noteAllEvents, false)
+		watched, err := w.addWatch(path, noteAllEvents, false, false)
 		if err != nil {
 			return err
 		}
-		if err := w.watchDirectoryFiles(path); err != nil {
-			return err
+		for _, owner := range owners {
+			w.watches.addOwner(watched, owner)
 		}
+		w.watches.markSeen(watched, true)
 		return nil
 	})
 	if err != nil {
 		return err
-	}
-	for _, owner := range owners {
-		w.watches.addOwnerTree(root, owner, true)
 	}
 	return nil
 }
@@ -1096,11 +1124,11 @@ func (w *kqueue) internalWatch(name string, fi os.FileInfo) (string, error) {
 		// mimic Linux providing delete events for subdirectories, but preserve
 		// the flags used if currently watching subdirectory
 		info, _ := w.watches.byPath(name)
-		return w.addWatch(name, info.dirFlags|unix.NOTE_DELETE|unix.NOTE_RENAME, true)
+		return w.addWatch(name, info.dirFlags|unix.NOTE_DELETE|unix.NOTE_RENAME, true, false)
 	}
 
 	// Watch file to mimic Linux inotify.
-	return w.addWatch(name, noteAllEvents, true)
+	return w.addWatch(name, noteAllEvents, true, false)
 }
 
 // Register events with the queue.
