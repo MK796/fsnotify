@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -36,6 +35,7 @@ type (
 		byDir   map[string]map[int]struct{}    // dirname(path) → wd
 		seen    map[string]struct{}            // Keep track of if we know this file exists.
 		byUser  map[string]struct{}            // Watches added with Watcher.Add()
+		target  map[string]string              // user path → physical watched path
 		recurse map[string]Op                  // Root paths → Op for recursive watches
 		owners  map[string]map[string]struct{} // watched path → explicit Add roots
 	}
@@ -55,6 +55,7 @@ func newWatches() *watches {
 		byDir:   make(map[string]map[int]struct{}),
 		seen:    make(map[string]struct{}),
 		byUser:  make(map[string]struct{}),
+		target:  make(map[string]string),
 		recurse: make(map[string]Op),
 		owners:  make(map[string]map[string]struct{}),
 	}
@@ -94,10 +95,11 @@ func (w *watches) watchesInDir(path string) []string {
 }
 
 // Mark path as added by the user.
-func (w *watches) addUserWatch(path string) {
+func (w *watches) addUserWatch(path, target string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.byUser[path] = struct{}{}
+	w.target[path] = target
 }
 
 func (w *watches) hasUserWatch(path string) bool {
@@ -146,12 +148,22 @@ func (w *watches) releaseOwner(owner string) []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	delete(w.byUser, owner)
-	delete(w.recurse, owner)
+	target := w.target[owner]
+	released := make(map[string]struct{}, 1)
+	for path, watched := range w.target {
+		if watched == target {
+			released[path] = struct{}{}
+			delete(w.byUser, path)
+			delete(w.target, path)
+			delete(w.recurse, path)
+		}
+	}
 
 	var unused []string
 	for path, owners := range w.owners {
-		delete(owners, owner)
+		for releasedOwner := range released {
+			delete(owners, releasedOwner)
+		}
 		if len(owners) == 0 {
 			unused = append(unused, path)
 		}
@@ -166,9 +178,10 @@ func (w *watches) removeRootsUnder(path string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	for root := range w.byUser {
-		if root == path || hasPathPrefix(root, path) {
+	for root, target := range w.target {
+		if target == path || hasPathPrefix(target, path) {
 			delete(w.byUser, root)
+			delete(w.target, root)
 			delete(w.recurse, root)
 		}
 	}
@@ -390,7 +403,7 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 			}
 			w.watches.addOwnerTree(watched, name, false)
 			if root == name {
-				w.watches.addUserWatch(root)
+				w.watches.addUserWatch(root, watched)
 			}
 			return nil
 		})
@@ -403,6 +416,7 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 		w.watches.addOwnerTree(name, name, true)
 		w.watches.mu.Lock()
 		w.watches.byUser[name] = struct{}{}
+		w.watches.target[name] = name
 		w.watches.recurse[name] = with.op
 		w.watches.mu.Unlock()
 		return nil
@@ -412,12 +426,15 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 	if err != nil {
 		return err
 	}
-	w.watches.addUserWatch(name)
+	w.watches.addUserWatch(name, watched)
 	w.watches.addOwnerTree(watched, name, false)
 	return nil
 }
 
 func (w *kqueue) Remove(name string) error {
+	if w.isClosed() {
+		return nil
+	}
 	if debug {
 		fmt.Fprintf(os.Stderr, "FSNOTIFY_DEBUG: %s  Remove(%q)\n",
 			time.Now().Format("15:04:05.000000000"), name)
@@ -661,7 +678,7 @@ func (w *kqueue) readEvents() {
 			//
 			// Technically fd 0 is a valid descriptor, so only skip it if
 			// there's no path, and if we're on macOS.
-			if !ok && kevent.Ident == 0 && runtime.GOOS == "darwin" {
+			if !ok {
 				continue
 			}
 
