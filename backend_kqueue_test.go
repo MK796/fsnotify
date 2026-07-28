@@ -8,6 +8,7 @@ package fsnotify
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -104,4 +105,82 @@ func TestRemoveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 0)
+}
+
+func TestRecursiveMoveOutDropsInternalWatches(t *testing.T) {
+	tmp := t.TempDir()
+	root := join(tmp, "root")
+	child := join(root, "child")
+	mkdir(t, root)
+	mkdir(t, child)
+	mkdir(t, child, "nested")
+	touch(t, child, "nested", "file")
+
+	collector := newCollector(t, join(root, "..."))
+	collector.collect(t)
+	kq := collector.w.b.(*kqueue)
+
+	if err := os.Rename(child, join(tmp, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvents()
+
+	kq.watches.mu.RLock()
+	for path := range kq.watches.path {
+		if path == child || hasPathPrefix(path, child) {
+			t.Errorf("stale watch after moving directory out of recursive root: %q", path)
+		}
+	}
+	kq.watches.mu.RUnlock()
+
+	collector.stop(t)
+}
+
+func TestRecursiveAddRollback(t *testing.T) {
+	tmp := t.TempDir()
+	root := join(tmp, "root")
+	allowed := join(root, "a-allowed")
+	denied := join(root, "z-denied")
+	mkdir(t, root)
+	mkdir(t, allowed)
+	touch(t, allowed, "file")
+	mkdir(t, denied)
+	if err := os.Chmod(denied, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(denied, 0o755)
+	})
+
+	w := newWatcher(t)
+	if err := w.Add(join(root, "...")); err == nil {
+		t.Fatal("recursive Add succeeded with an unreadable subtree")
+	}
+
+	kq := w.b.(*kqueue)
+	if got := w.WatchList(); len(got) != 0 {
+		t.Fatalf("WatchList after failed recursive Add: %q", got)
+	}
+
+	kq.watches.mu.RLock()
+	defer kq.watches.mu.RUnlock()
+	if len(kq.watches.path) != 0 ||
+		len(kq.watches.wd) != 0 ||
+		len(kq.watches.byDir) != 0 ||
+		len(kq.watches.byUser) != 0 ||
+		len(kq.watches.target) != 0 ||
+		len(kq.watches.recurse) != 0 ||
+		len(kq.watches.owners) != 0 ||
+		len(kq.watches.seen) != 0 {
+		t.Fatalf("watch state retained after failed recursive Add: paths=%d descriptors=%d dirs=%d users=%d targets=%d roots=%d owners=%d seen=%d",
+			len(kq.watches.path),
+			len(kq.watches.wd),
+			len(kq.watches.byDir),
+			len(kq.watches.byUser),
+			len(kq.watches.target),
+			len(kq.watches.recurse),
+			len(kq.watches.owners),
+			len(kq.watches.seen),
+		)
+	}
 }
