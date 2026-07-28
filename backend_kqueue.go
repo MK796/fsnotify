@@ -826,7 +826,9 @@ func (w *kqueue) readEvents() {
 
 			event := w.newEvent(path.name, path.linkName, mask)
 
-			if event.Has(Rename) || event.Has(Remove) {
+			if event.Has(Rename) {
+				w.removePhysical(event.Name, path.isDir)
+			} else if event.Has(Remove) {
 				_ = w.remove(event.Name, false)
 				w.watches.markSeen(event.Name, false)
 			}
