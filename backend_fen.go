@@ -39,7 +39,6 @@ type fen struct {
 }
 
 type fenRename struct {
-	path string
 	info os.FileInfo
 }
 
@@ -251,11 +250,11 @@ func (w *fen) rememberRename(path string) {
 		return
 	}
 
-	w.renames[w.renameIndex] = fenRename{path: path, info: w.info[path]}
+	w.renames[w.renameIndex] = fenRename{info: w.info[path]}
 	w.renameIndex = (w.renameIndex + 1) % uint8(len(w.renames))
 }
 
-func (w *fen) takeRename(info os.FileInfo) (fenRename, bool) {
+func (w *fen) takeRename(info os.FileInfo) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for offset := 1; offset <= len(w.renames); offset++ {
@@ -265,9 +264,9 @@ func (w *fen) takeRename(info os.FileInfo) (fenRename, bool) {
 			continue
 		}
 		w.renames[i] = fenRename{}
-		return rename, true
+		return true
 	}
-	return fenRename{}, false
+	return false
 }
 
 func (w *fen) AddWith(name string, opts ...addOpt) error {
@@ -603,8 +602,8 @@ func (w *fen) updateDirectory(path string) error {
 		}
 
 		if finfo.IsDir() && len(recursiveOwners) > 0 {
-			if rename, ok := w.takeRename(finfo); ok {
-				if !w.sendEvent(Event{Name: entryPath, renamedFrom: rename.path, Op: Create}) {
+			if w.takeRename(finfo) {
+				if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
 					return nil
 				}
 				if err := w.addRenamedSubdir(entryPath, owners, recursiveOwners); err != nil {
