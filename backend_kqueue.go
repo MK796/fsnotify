@@ -749,7 +749,7 @@ func (w *kqueue) addWatchDescriptor(name string, flags uint32, listDir bool) (wa
 		flags |= noteDirectoryEvents
 	}
 
-	err := w.register([]int{info.wd}, unix.EV_ADD|unix.EV_CLEAR|unix.EV_ENABLE, flags)
+	err = w.register([]int{info.wd}, unix.EV_ADD|unix.EV_CLEAR|unix.EV_ENABLE, flags)
 	if err != nil {
 		unix.Close(info.wd)
 		return "", false, "", err
