@@ -9,7 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
+	"sort"
 	"sync"
 	"time"
 	"unsafe"
@@ -51,8 +51,12 @@ type inotify struct {
 
 type (
 	watches struct {
-		wd   map[uint32]*watch // wd → watch
-		path map[string]uint32 // pathname → wd
+		wd      map[uint32]*watch              // wd → physical watch
+		path    map[string]uint32              // physical path → wd
+		byUser  map[string]struct{}            // paths explicitly added by the user
+		target  map[string]string              // user path → current physical path
+		recurse map[string]struct{}            // recursive user roots
+		owners  map[string]map[string]struct{} // physical path → user roots
 	}
 	watch struct {
 		wd         uint32 // Watch descriptor (as returned by the inotify_add_watch() syscall)
@@ -71,8 +75,12 @@ func (w watch) recurse() bool { return w.watchFlags&flagRecurse != 0 }
 
 func newWatches() *watches {
 	return &watches{
-		wd:   make(map[uint32]*watch),
-		path: make(map[string]uint32),
+		wd:      make(map[uint32]*watch),
+		path:    make(map[string]uint32),
+		byUser:  make(map[string]struct{}),
+		target:  make(map[string]string),
+		recurse: make(map[string]struct{}),
+		owners:  make(map[string]map[string]struct{}),
 	}
 }
 
@@ -80,36 +88,134 @@ func (w *watches) byPath(path string) *watch { return w.wd[w.path[path]] }
 func (w *watches) byWd(wd uint32) *watch     { return w.wd[wd] }
 func (w *watches) len() int                  { return len(w.wd) }
 func (w *watches) add(ww *watch)             { w.wd[ww.wd] = ww; w.path[ww.path] = ww.wd }
-func (w *watches) remove(watch *watch)       { delete(w.path, watch.path); delete(w.wd, watch.wd) }
+func (w *watches) remove(watch *watch) {
+	delete(w.path, watch.path)
+	delete(w.wd, watch.wd)
+	delete(w.owners, watch.path)
+}
 
-func (w *watches) removePath(path string) ([]uint32, error) {
-	path, recurse := recursivePath(path)
-	wd, ok := w.path[path]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrNonExistentWatch, path)
+func (w *watches) addUser(path string, recursive bool) {
+	w.byUser[path] = struct{}{}
+	w.target[path] = path
+	if recursive {
+		w.recurse[path] = struct{}{}
 	}
+}
 
-	watch := w.wd[wd]
-	if recurse && !watch.recurse() {
-		return nil, fmt.Errorf("can't use /... with non-recursive watch %q", path)
+func (w *watches) addOwner(path, owner string) {
+	owners := w.owners[path]
+	if owners == nil {
+		owners = make(map[string]struct{}, 1)
+		w.owners[path] = owners
 	}
+	owners[owner] = struct{}{}
+	w.updateFlags(path)
+}
 
-	delete(w.path, path)
-	delete(w.wd, wd)
-	if !watch.recurse() {
-		return []uint32{wd}, nil
-	}
-
-	wds := make([]uint32, 0, 8)
-	wds = append(wds, wd)
-	for p, rwd := range w.path {
-		if hasPathPrefix(p, path) {
-			delete(w.path, p)
-			delete(w.wd, rwd)
-			wds = append(wds, rwd)
+func (w *watches) recursiveOwners(path string) []string {
+	owners := w.owners[path]
+	out := make([]string, 0, len(owners))
+	for owner := range owners {
+		if _, ok := w.recurse[owner]; ok {
+			out = append(out, owner)
 		}
 	}
+	return out
+}
+
+func (w *watches) updateFlags(path string) {
+	wd, ok := w.path[path]
+	if !ok {
+		return
+	}
+	watch := w.wd[wd]
+	watch.watchFlags = 0
+	for owner := range w.owners[path] {
+		if w.target[owner] == path {
+			watch.watchFlags |= flagByUser
+		}
+		if _, ok := w.recurse[owner]; ok {
+			watch.watchFlags |= flagRecurse
+		}
+	}
+}
+
+func (w *watches) releaseOwner(owner string, requireRecursive bool) ([]uint32, error) {
+	if _, ok := w.byUser[owner]; !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNonExistentWatch, owner)
+	}
+	if _, recursive := w.recurse[owner]; requireRecursive && !recursive {
+		return nil, fmt.Errorf("can't use /... with non-recursive watch %q", owner)
+	}
+
+	delete(w.byUser, owner)
+	delete(w.target, owner)
+	delete(w.recurse, owner)
+
+	type unusedWatch struct {
+		path string
+		wd   uint32
+	}
+	var unused []unusedWatch
+	for path, owners := range w.owners {
+		delete(owners, owner)
+		if len(owners) == 0 {
+			unused = append(unused, unusedWatch{path: path, wd: w.path[path]})
+			continue
+		}
+		w.updateFlags(path)
+	}
+	sort.Slice(unused, func(i, j int) bool {
+		return len(unused[i].path) > len(unused[j].path)
+	})
+
+	wds := make([]uint32, 0, len(unused))
+	for _, item := range unused {
+		delete(w.owners, item.path)
+		delete(w.path, item.path)
+		delete(w.wd, item.wd)
+		wds = append(wds, item.wd)
+	}
 	return wds, nil
+}
+
+func (w *watches) rebase(oldPath, newPath string) {
+	type move struct {
+		from string
+		to   string
+		wd   uint32
+	}
+	var moved []move
+	for path, wd := range w.path {
+		if path == oldPath || hasPathPrefix(path, oldPath) {
+			moved = append(moved, move{
+				from: path,
+				to:   newPath + path[len(oldPath):],
+				wd:   wd,
+			})
+		}
+	}
+	for _, move := range moved {
+		delete(w.path, move.from)
+	}
+	for _, move := range moved {
+		w.path[move.to] = move.wd
+		watch := w.wd[move.wd]
+		watch.path = move.to
+		w.wd[move.wd] = watch
+		if owners, ok := w.owners[move.from]; ok {
+			delete(w.owners, move.from)
+			w.owners[move.to] = owners
+		}
+	}
+	for owner, target := range w.target {
+		if target == oldPath || hasPathPrefix(target, oldPath) {
+			w.target[owner] = newPath + target[len(oldPath):]
+		}
+	}
+	for _, move := range moved {
+		w.updateFlags(move.to)
+	}
 }
 
 func (w *watches) updatePath(path string, f func(*watch) (*watch, error)) error {
@@ -171,7 +277,7 @@ func (w *inotify) Close() error {
 		return err
 	}
 	w.mu.Lock()
-	for name := range w.watches.path {
+	for name := range w.watches.byUser {
 		w.remove(name)
 	}
 	w.mu.Unlock()
@@ -196,7 +302,7 @@ func (w *inotify) AddWith(path string, opts ...addOpt) error {
 		return fmt.Errorf("%w: %s", xErrUnsupported, with.op)
 	}
 
-	add := func(path string, with withOpts, wf watchFlag) error {
+	add := func(path string, with withOpts, owners ...string) error {
 		var flags uint32
 		if with.op.Has(Create) {
 			flags |= unix.IN_CREATE
@@ -225,14 +331,28 @@ func (w *inotify) AddWith(path string, opts ...addOpt) error {
 		if with.op.Has(xUnportableCloseRead) {
 			flags |= unix.IN_CLOSE_NOWRITE
 		}
-		return w.register(path, flags, wf)
+		return w.register(path, flags, owners)
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	path, recurse := recursivePath(path)
+	_, existed := w.watches.byUser[path]
+	w.watches.addUser(path, recurse)
+	rollback := func() {
+		if existed {
+			return
+		}
+		wds, err := w.watches.releaseOwner(path, false)
+		if err != nil {
+			return
+		}
+		for _, wd := range wds {
+			_, _ = unix.InotifyRmWatch(w.fd, wd)
+		}
+	}
 	if recurse {
-		return filepath.WalkDir(path, func(root string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(path, func(root string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -253,19 +373,23 @@ func (w *inotify) AddWith(path string, opts ...addOpt) error {
 				w.sendEvent(Event{Name: root, Op: Create})
 			}
 
-			wf := flagRecurse
-			if root == path {
-				wf |= flagByUser
-			}
-			return add(root, with, wf)
+			return add(root, with, path)
 		})
+		if err != nil {
+			rollback()
+		}
+		return err
 	}
 
-	return add(path, with, 0)
+	err := add(path, with, path)
+	if err != nil {
+		rollback()
+	}
+	return err
 }
 
-func (w *inotify) register(path string, flags uint32, wf watchFlag) error {
-	return w.watches.updatePath(path, func(existing *watch) (*watch, error) {
+func (w *inotify) register(path string, flags uint32, owners []string) error {
+	err := w.watches.updatePath(path, func(existing *watch) (*watch, error) {
 		if existing != nil {
 			flags |= existing.flags | unix.IN_MASK_ADD
 		}
@@ -281,10 +405,9 @@ func (w *inotify) register(path string, flags uint32, wf watchFlag) error {
 
 		if existing == nil {
 			return &watch{
-				wd:         uint32(wd),
-				path:       path,
-				flags:      flags,
-				watchFlags: wf,
+				wd:    uint32(wd),
+				path:  path,
+				flags: flags,
 			}, nil
 		}
 
@@ -292,6 +415,13 @@ func (w *inotify) register(path string, flags uint32, wf watchFlag) error {
 		existing.flags = flags
 		return existing, nil
 	})
+	if err != nil {
+		return err
+	}
+	for _, owner := range owners {
+		w.watches.addOwner(path, owner)
+	}
+	return nil
 }
 
 func (w *inotify) Remove(name string) error {
@@ -309,7 +439,8 @@ func (w *inotify) Remove(name string) error {
 }
 
 func (w *inotify) remove(name string) error {
-	wds, err := w.watches.removePath(name)
+	name, recursive := recursivePath(name)
+	wds, err := w.watches.releaseOwner(name, recursive)
 	if err != nil {
 		return err
 	}
@@ -341,8 +472,8 @@ func (w *inotify) WatchList() []string {
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	entries := make([]string, 0, w.watches.len())
-	for pathname := range w.watches.path {
+	entries := make([]string, 0, len(w.watches.byUser))
+	for pathname := range w.watches.byUser {
 		entries = append(entries, pathname)
 	}
 	return entries
@@ -488,11 +619,6 @@ func (w *inotify) handleEvent(inEvent *unix.InotifyEvent, buf *[65536]byte, offs
 		isDir := inEvent.Mask&unix.IN_ISDIR == unix.IN_ISDIR
 		/// New directory created: set up watch on it.
 		if isDir && ev.Has(Create) {
-			err := w.register(ev.Name, watch.flags, flagRecurse)
-			if !w.sendError(err) {
-				return Event{}, false
-			}
-
 			// Directory rename, so we need to update all the children.
 			//
 			// TODO: this is of course pretty slow; we should use a better data
@@ -501,20 +627,12 @@ func (w *inotify) handleEvent(inEvent *unix.InotifyEvent, buf *[65536]byte, offs
 			// in the future. For now I'm okay with this as it's not publicly
 			// available. Correctness first, performance second.
 			if ev.renamedFrom != "" {
-				for path, wd := range w.watches.path {
-					if wd == watch.wd || path == ev.Name {
-						continue
-					}
-
-					if hasPathPrefix(path, ev.renamedFrom) {
-						delete(w.watches.path, path)
-						path = strings.Replace(path, ev.renamedFrom, ev.Name, 1)
-						w.watches.path[path] = wd
-
-						ww := w.watches.wd[wd]
-						ww.path = path
-						w.watches.wd[wd] = ww
-					}
+				w.watches.rebase(ev.renamedFrom, ev.Name)
+			} else {
+				owners := w.watches.recursiveOwners(watch.path)
+				err := w.register(ev.Name, watch.flags, owners)
+				if !w.sendError(err) {
+					return Event{}, false
 				}
 			}
 		}
