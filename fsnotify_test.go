@@ -926,7 +926,9 @@ func TestWatchList(t *testing.T) {
 		t.Parallel()
 
 		tmp := t.TempDir()
-		mkdir(t, tmp, "a", "b")
+		child := join(tmp, "a")
+		mkdir(t, child)
+		mkdir(t, child, "b")
 
 		w := newWatcher(t, join(tmp, "..."))
 		defer w.Close()
@@ -940,6 +942,7 @@ func TestWatchList(t *testing.T) {
 
 		tmp := t.TempDir()
 		inner := join(tmp, "a")
+		mkdir(t, inner)
 		mkdir(t, inner, "b")
 
 		w := newWatcher(t, join(tmp, "..."), join(inner, "..."))
