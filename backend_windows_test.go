@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestRemoveState(t *testing.T) {
@@ -110,5 +112,27 @@ func TestWindowsMask(t *testing.T) {
 				t.Errorf("toWindowsMask(%s) = %#x; want %#x", tt.op, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWindowsStartReadClosed(t *testing.T) {
+	errors := make(chan error, 2)
+	w := &readDirChangesW{
+		Errors:  errors,
+		watches: make(watchMap),
+	}
+	watch := &watch{
+		closed: true,
+		ino:    &inode{handle: windows.InvalidHandle},
+		names:  make(map[string]uint64),
+	}
+
+	if err := w.startRead(watch); err != nil {
+		t.Fatalf("startRead returned an error for a closed watch: %v", err)
+	}
+	select {
+	case err := <-errors:
+		t.Fatalf("startRead accessed the closed watch handle: %v", err)
+	default:
 	}
 }

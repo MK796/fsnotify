@@ -261,6 +261,7 @@ type inode struct {
 type watch struct {
 	ov      windows.Overlapped
 	ino     *inode            // i-number
+	closed  bool              // Handle was closed; queued completions must not rearm it.
 	recurse bool              // Recursive watch?
 	path    string            // Directory path
 	mask    uint64            // Directory itself is being watched with these notify flags
@@ -469,6 +470,10 @@ func (w *readDirChangesW) deleteWatch(watch *watch) {
 
 // Must run within the I/O thread.
 func (w *readDirChangesW) startRead(watch *watch) error {
+	if watch.closed {
+		return nil
+	}
+
 	err := windows.CancelIo(watch.ino.handle)
 	if err != nil {
 		w.sendError(os.NewSyscallError("CancelIo", err))
@@ -479,12 +484,16 @@ func (w *readDirChangesW) startRead(watch *watch) error {
 		mask |= w.toWindowsFlags(m)
 	}
 	if mask == 0 {
+		watch.closed = true
 		err := windows.CloseHandle(watch.ino.handle)
 		if err != nil {
 			w.sendError(os.NewSyscallError("CloseHandle", err))
 		}
 		w.mu.Lock()
-		delete(w.watches[watch.ino.volume], watch.ino.index)
+		index := w.watches[watch.ino.volume]
+		if index[watch.ino.index] == watch {
+			delete(index, watch.ino.index)
+		}
 		w.mu.Unlock()
 		return nil
 	}
@@ -556,6 +565,9 @@ func (w *readDirChangesW) readEvents() {
 				}
 			default:
 			}
+			continue
+		}
+		if watch.closed {
 			continue
 		}
 
