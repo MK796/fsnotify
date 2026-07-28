@@ -29,3 +29,16 @@ Output:
 
 		create   /root/newsub
 		create   /root/newsub/file2
+
+	windows:
+		create   /root/sub/deep/file1
+		write    /root/sub
+
+		remove   /root/sub/deep/file1
+		write    /root/sub/deep
+		remove   /root/sub/deep
+		write    /root/sub
+		remove   /root/sub
+
+		create   /root/newsub
+		create   /root/newsub/file2
