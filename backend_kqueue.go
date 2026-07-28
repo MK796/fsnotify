@@ -524,7 +524,7 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 			if with.sendCreate && root != name {
 				w.sendEvent(Event{Name: root, Op: Create})
 			}
-			watched, err := w.addWatch(root, noteAllEvents, false)
+			watched, err := w.addWatch(root, noteAllEvents, false, true)
 			if err != nil {
 				return err
 			}
@@ -549,7 +549,7 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 		return nil
 	}
 
-	watched, err := w.addWatch(name, noteAllEvents, false)
+	watched, err := w.addWatch(name, noteAllEvents, false, false)
 	if err != nil {
 		return err
 	}
@@ -672,7 +672,7 @@ const noteAllEvents = unix.NOTE_DELETE | unix.NOTE_WRITE | unix.NOTE_ATTRIB | un
 // described in kevent(2).
 //
 // Returns the real path to the file which was added, with symlinks resolved.
-func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, error) {
+func (w *kqueue) addWatch(name string, flags uint32, listDir, recursive bool) (string, error) {
 	w.watchMu.Lock()
 	watched, watchDir, dir, err := w.addWatchDescriptor(name, flags, listDir)
 	w.watchMu.Unlock()
@@ -680,7 +680,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 		return "", err
 	}
 	if watchDir {
-		if err := w.watchDirectoryFiles(dir); err != nil {
+		if err := w.watchDirectoryFiles(dir, recursive); err != nil {
 			return "", err
 		}
 	}
@@ -938,7 +938,7 @@ func (w *kqueue) newEvent(name, linkName string, mask uint32) Event {
 }
 
 // watchDirectoryFiles to mimic inotify when adding a watch on a directory
-func (w *kqueue) watchDirectoryFiles(dirPath string) error {
+func (w *kqueue) watchDirectoryFiles(dirPath string, recursive bool) error {
 	files, err := os.ReadDir(dirPath)
 	if err != nil {
 		return err
@@ -952,7 +952,7 @@ func (w *kqueue) watchDirectoryFiles(dirPath string) error {
 			return fmt.Errorf("%q: %w", path, err)
 		}
 
-		cleanPath, err := w.internalWatch(path, fi)
+		cleanPath, err := w.internalWatch(path, fi, recursive)
 		if err != nil {
 			// No permission, entry resolved to a missing target (e.g. a
 			// dangling symlink), or doesn't exist: not a problem, just skip.
@@ -1036,7 +1036,7 @@ func (w *kqueue) sendCreateIfNew(path string, fi os.FileInfo, owners []string) e
 		return w.addRecursiveSubdir(path, owners)
 	}
 
-	path, err := w.internalWatch(path, fi)
+	path, err := w.internalWatch(path, fi, w.watches.isUnderRecurse(path))
 	if err != nil {
 		return err
 	}
@@ -1057,7 +1057,7 @@ func (w *kqueue) addRecursiveSubdir(root string, owners []string) error {
 			if err != nil {
 				return err
 			}
-			cleanPath, err := w.internalWatch(path, fi)
+			cleanPath, err := w.internalWatch(path, fi, true)
 			if err != nil {
 				if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) {
 					cleanPath = filepath.Clean(path)
@@ -1073,11 +1073,8 @@ func (w *kqueue) addRecursiveSubdir(root string, owners []string) error {
 				return nil
 			}
 		}
-		_, err = w.addWatch(path, noteAllEvents, false)
+		_, err = w.addWatch(path, noteAllEvents, false, true)
 		if err != nil {
-			return err
-		}
-		if err := w.watchDirectoryFiles(path); err != nil {
 			return err
 		}
 		return nil
@@ -1091,16 +1088,20 @@ func (w *kqueue) addRecursiveSubdir(root string, owners []string) error {
 	return nil
 }
 
-func (w *kqueue) internalWatch(name string, fi os.FileInfo) (string, error) {
+func (w *kqueue) internalWatch(name string, fi os.FileInfo, recursive bool) (string, error) {
 	if fi.IsDir() {
 		// mimic Linux providing delete events for subdirectories, but preserve
 		// the flags used if currently watching subdirectory
 		info, _ := w.watches.byPath(name)
-		return w.addWatch(name, info.dirFlags|unix.NOTE_DELETE|unix.NOTE_RENAME, true)
+		flags := info.dirFlags | unix.NOTE_DELETE | unix.NOTE_RENAME
+		if recursive {
+			flags = noteAllEvents
+		}
+		return w.addWatch(name, flags, true, recursive)
 	}
 
 	// Watch file to mimic Linux inotify.
-	return w.addWatch(name, noteAllEvents, true)
+	return w.addWatch(name, noteAllEvents, true, false)
 }
 
 // Register events with the queue.
