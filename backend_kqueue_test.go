@@ -8,6 +8,7 @@ package fsnotify
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -104,4 +105,33 @@ func TestRemoveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 0)
+}
+
+func TestRecursiveMoveOutDropsInternalWatches(t *testing.T) {
+	tmp := t.TempDir()
+	root := join(tmp, "root")
+	child := join(root, "child")
+	mkdir(t, root)
+	mkdir(t, child)
+	mkdir(t, child, "nested")
+	touch(t, child, "nested", "file")
+
+	collector := newCollector(t, join(root, "..."))
+	collector.collect(t)
+	kq := collector.w.b.(*kqueue)
+
+	if err := os.Rename(child, join(tmp, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvents()
+
+	kq.watches.mu.RLock()
+	for path := range kq.watches.path {
+		if path == child || hasPathPrefix(path, child) {
+			t.Errorf("stale watch after moving directory out of recursive root: %q", path)
+		}
+	}
+	kq.watches.mu.RUnlock()
+
+	collector.stop(t)
 }
