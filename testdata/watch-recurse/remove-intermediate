@@ -1,5 +1,6 @@
 # Removing an intermediate directory should not break the recursive root.
 require recurse
+ignore write
 
 mkdir -p /root/sub/deep
 watch /root/...
@@ -25,19 +26,6 @@ Output:
 
 		remove   /root/sub/deep/file1
 		remove   /root/sub/deep
-		remove   /root/sub
-
-		create   /root/newsub
-		create   /root/newsub/file2
-
-	windows:
-		create   /root/sub/deep/file1
-		write    /root/sub
-
-		remove   /root/sub/deep/file1
-		write    /root/sub/deep
-		remove   /root/sub/deep
-		write    /root/sub
 		remove   /root/sub
 
 		create   /root/newsub
