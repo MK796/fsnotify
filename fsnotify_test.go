@@ -894,6 +894,17 @@ func TestEventString(t *testing.T) {
 }
 
 func TestWatchList(t *testing.T) {
+	check := func(t *testing.T, w *Watcher, want ...string) {
+		t.Helper()
+
+		have := w.WatchList()
+		sort.Strings(have)
+		sort.Strings(want)
+		if !slices.Equal(have, want) {
+			t.Errorf("\nhave: %q\nwant: %q", have, want)
+		}
+	}
+
 	t.Run("works", func(t *testing.T) {
 		t.Parallel()
 
@@ -907,12 +918,64 @@ func TestWatchList(t *testing.T) {
 		w := newWatcher(t, file, tmp)
 		defer w.Close()
 
-		have := w.WatchList()
-		sort.Strings(have)
-		want := []string{tmp, file}
-		if !slices.Equal(have, want) {
-			t.Errorf("\nhave: %s\nwant: %s", have, want)
+		check(t, w, tmp, file)
+	})
+
+	t.Run("recursive root only", func(t *testing.T) {
+		supportsRecurse(t)
+		t.Parallel()
+
+		tmp := t.TempDir()
+		mkdir(t, tmp, "a", "b")
+
+		w := newWatcher(t, join(tmp, "..."))
+		defer w.Close()
+
+		check(t, w, tmp)
+	})
+
+	t.Run("overlapping recursive roots", func(t *testing.T) {
+		supportsRecurse(t)
+		t.Parallel()
+
+		tmp := t.TempDir()
+		inner := join(tmp, "a")
+		mkdir(t, inner, "b")
+
+		w := newWatcher(t, join(tmp, "..."), join(inner, "..."))
+		defer w.Close()
+
+		check(t, w, tmp, inner)
+		if err := w.Remove(join(tmp, "...")); err != nil {
+			t.Fatal(err)
 		}
+		check(t, w, inner)
+		if err := w.Remove(join(inner, "...")); err != nil {
+			t.Fatal(err)
+		}
+		check(t, w)
+	})
+
+	t.Run("explicit child outlives recursive root", func(t *testing.T) {
+		supportsRecurse(t)
+		t.Parallel()
+
+		tmp := t.TempDir()
+		child := join(tmp, "a")
+		mkdir(t, child)
+
+		w := newWatcher(t, join(tmp, "..."), child)
+		defer w.Close()
+
+		check(t, w, tmp, child)
+		if err := w.Remove(join(tmp, "...")); err != nil {
+			t.Fatal(err)
+		}
+		check(t, w, child)
+		if err := w.Remove(child); err != nil {
+			t.Fatal(err)
+		}
+		check(t, w)
 	})
 
 	t.Run("race", func(t *testing.T) {
