@@ -479,9 +479,10 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
-		}
-		if !w.sendEvent(Event{Name: path, Op: Write}) {
-			return nil
+		} else {
+			if !w.sendEvent(Event{Name: path, Op: Write}) {
+				return nil
+			}
 		}
 	}
 	if events&unix.FILE_ATTRIB != 0 && stat != nil {
