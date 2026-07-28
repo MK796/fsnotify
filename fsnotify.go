@@ -464,6 +464,9 @@ func hasPathPrefix(path, root string) bool {
 	if path == root {
 		return true
 	}
+	if len(root) > 0 && os.IsPathSeparator(root[len(root)-1]) {
+		return strings.HasPrefix(path, root)
+	}
 	return strings.HasPrefix(path, root+string(os.PathSeparator))
 }
 
