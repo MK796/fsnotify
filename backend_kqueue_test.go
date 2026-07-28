@@ -144,6 +144,7 @@ func TestDiagnosticNetBSDRecursiveDescriptors(t *testing.T) {
 	}
 
 	tmp := t.TempDir()
+	mkdir(t, tmp, "sub")
 	mkdir(t, tmp, "sub", "dir")
 
 	w := newWatcher(t)
