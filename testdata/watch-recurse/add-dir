@@ -28,7 +28,7 @@ Output:
 	create   /sub/dir/newdir/file
 	write    /sub/dir/newdir/file
 
-	linux, kqueue:  # These backends don't expose directory writes.
+	linux, kqueue, fen:  # These backends don't expose directory writes.
 		create   /sub/dir/newdir
 		create   /sub/dir/newdir/file
 		remove   /sub/dir/newdir/file

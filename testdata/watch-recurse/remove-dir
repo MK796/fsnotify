@@ -24,7 +24,7 @@ Output:
 	write  /sub
 	remove /sub
 
-	linux, kqueue:  # These backends don't expose directory writes.
+	linux, kqueue, fen:  # These backends don't expose directory writes.
 		create   /sub/dir/file
 		write    /sub/dir/file
 

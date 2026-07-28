@@ -47,7 +47,7 @@ Output:
 	remove      /watch/j
 	remove      /watch
 
-	linux, kqueue:  # These backends don't expose directory writes.
+	linux, kqueue, fen:  # These backends don't expose directory writes.
 		remove      /watch/a
 		remove      /watch/b
 		remove      /watch/c
