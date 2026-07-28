@@ -32,6 +32,15 @@ type fen struct {
 	byUser  map[string]Op                  // Paths added through Add().
 	recurse map[string]Op                  // Recursive roots → Op filter.
 	owners  map[string]map[string]struct{} // Associated path → Add() roots.
+	info    map[string]os.FileInfo         // Last identity associated with a path.
+
+	renames     [10]fenRename
+	renameIndex uint8
+}
+
+type fenRename struct {
+	path string
+	info os.FileInfo
 }
 
 var defaultBufferSize = 0
@@ -46,6 +55,7 @@ func newBackend(ev chan Event, errs chan error) (backend, error) {
 		byUser:  make(map[string]Op),
 		recurse: make(map[string]Op),
 		owners:  make(map[string]map[string]struct{}),
+		info:    make(map[string]os.FileInfo),
 	}
 
 	var err error
@@ -95,6 +105,9 @@ func (w *fen) associateOwned(path string, stat os.FileInfo, follow bool, op Op, 
 	defer w.mu.Unlock()
 	if stat.IsDir() && scanDir {
 		w.dirs[path] = op
+	}
+	if stat.IsDir() {
+		w.info[path] = stat
 	}
 	pathOwners := w.owners[path]
 	if pathOwners == nil {
@@ -167,6 +180,7 @@ func (w *fen) dropAssociation(path string) error {
 	delete(w.dirs, path)
 	delete(w.watches, path)
 	delete(w.owners, path)
+	delete(w.info, path)
 	w.mu.Unlock()
 
 	if !w.port.PathIsWatched(path) {
@@ -181,21 +195,35 @@ func (w *fen) dropAssociation(path string) error {
 func (w *fen) dropPhysical(path string, tree bool) {
 	w.mu.Lock()
 	var paths []string
+	var removedUser []string
 	for tracked := range w.owners {
 		if tracked == path || (tree && hasPathPrefix(tracked, path)) {
 			paths = append(paths, tracked)
 			delete(w.dirs, tracked)
 			delete(w.watches, tracked)
 			delete(w.owners, tracked)
+			delete(w.info, tracked)
 		}
 	}
 	for userPath := range w.byUser {
 		if userPath == path || (tree && hasPathPrefix(userPath, path)) {
+			if userPath != path {
+				removedUser = append(removedUser, userPath)
+			}
 			delete(w.byUser, userPath)
 			delete(w.recurse, userPath)
 		}
 	}
 	w.mu.Unlock()
+
+	sort.Slice(removedUser, func(i, j int) bool {
+		return len(removedUser[i]) > len(removedUser[j])
+	})
+	for _, removed := range removedUser {
+		if !w.sendEvent(Event{Name: removed, Op: Remove}) {
+			return
+		}
+	}
 
 	for _, tracked := range paths {
 		if tracked == path || !w.port.PathIsWatched(tracked) {
@@ -203,6 +231,43 @@ func (w *fen) dropPhysical(path string, tree bool) {
 		}
 		_ = w.port.DissociatePath(tracked)
 	}
+}
+
+func (w *fen) rememberRename(path string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var recursiveOwner bool
+	for owner := range w.owners[path] {
+		if owner == path {
+			continue
+		}
+		if _, ok := w.recurse[owner]; ok {
+			recursiveOwner = true
+			break
+		}
+	}
+	if !recursiveOwner || w.info[path] == nil {
+		return
+	}
+
+	w.renames[w.renameIndex] = fenRename{path: path, info: w.info[path]}
+	w.renameIndex = (w.renameIndex + 1) % uint8(len(w.renames))
+}
+
+func (w *fen) takeRename(info os.FileInfo) (fenRename, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for offset := 1; offset <= len(w.renames); offset++ {
+		i := (int(w.renameIndex) - offset + len(w.renames)) % len(w.renames)
+		rename := w.renames[i]
+		if rename.info == nil || !os.SameFile(rename.info, info) {
+			continue
+		}
+		w.renames[i] = fenRename{}
+		return rename, true
+	}
+	return fenRename{}, false
 }
 
 func (w *fen) AddWith(name string, opts ...addOpt) error {
@@ -415,6 +480,9 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		if !w.sendEvent(Event{Name: path, Op: Rename}) {
 			return nil
 		}
+		if fmode.IsDir() {
+			w.rememberRename(path)
+		}
 		// Don't keep watching the new file name
 		reRegister = false
 	}
@@ -535,6 +603,20 @@ func (w *fen) updateDirectory(path string) error {
 		}
 
 		if finfo.IsDir() && len(recursiveOwners) > 0 {
+			if rename, ok := w.takeRename(finfo); ok {
+				if !w.sendEvent(Event{Name: entryPath, renamedFrom: rename.path, Op: Create}) {
+					return nil
+				}
+				if err := w.addRenamedSubdir(entryPath, owners, recursiveOwners); err != nil {
+					if errors.Is(err, fs.ErrNotExist) {
+						continue
+					}
+					if !w.sendError(err) {
+						return nil
+					}
+				}
+				continue
+			}
 			if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
 				return nil
 			}
@@ -561,6 +643,23 @@ func (w *fen) updateDirectory(path string) error {
 		}
 	}
 	return nil
+}
+
+func (w *fen) addRenamedSubdir(root string, rootOwners, recursiveOwners []string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		stat, err := d.Info()
+		if err != nil {
+			return err
+		}
+		owners := recursiveOwners
+		if path == root {
+			owners = rootOwners
+		}
+		return w.associateOwned(path, stat, false, w.opForOwners(owners), owners, d.IsDir())
+	})
 }
 
 func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []string) error {
