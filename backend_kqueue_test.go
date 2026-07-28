@@ -9,6 +9,8 @@ package fsnotify
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -134,4 +136,29 @@ func TestRecursiveMoveOutDropsInternalWatches(t *testing.T) {
 	kq.watches.mu.RUnlock()
 
 	collector.stop(t)
+}
+
+func TestDiagnosticNetBSDRecursiveDescriptors(t *testing.T) {
+	if runtime.GOOS != "netbsd" {
+		t.Skip("NetBSD diagnostic")
+	}
+
+	tmp := t.TempDir()
+	mkdir(t, tmp, "sub", "dir")
+
+	w := newWatcher(t)
+	addWatch(t, w, join(tmp, "..."))
+	kq := w.b.(*kqueue)
+
+	kq.watches.mu.RLock()
+	paths := make([]string, 0, len(kq.watches.path))
+	for path := range kq.watches.path {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		info := kq.watches.wd[kq.watches.path[path]]
+		t.Logf("watch path=%q fd=%d isDir=%t flags=%#x", path, info.wd, info.isDir, info.dirFlags)
+	}
+	kq.watches.mu.RUnlock()
 }

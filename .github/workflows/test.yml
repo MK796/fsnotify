@@ -130,7 +130,7 @@ jobs:
           run: |
             useradd -mG wheel action
             su action -c '/usr/pkg/bin/go??? version'
-            FSNOTIFY_DEBUG=1 su action -c '/usr/pkg/bin/go??? test -parallel 1 -count=1 -run "TestScript/watch-recurse/(add-file|rename-dir|remove-intermediate)" -v .'
+            FSNOTIFY_DEBUG=1 su action -c '/usr/pkg/bin/go??? test -parallel 1 -count=1 -run "(TestScript/watch-recurse/(add-file|rename-dir|remove-intermediate)|TestDiagnosticNetBSDRecursiveDescriptors)" -v .'
             FSNOTIFY_BUFFER=4096 su action -c '/usr/pkg/bin/go??? test -parallel 1    ./...'
                                  su action -c '/usr/pkg/bin/go??? test -parallel 1    ./...'
             FSNOTIFY_DEBUG=1     su action -c '/usr/pkg/bin/go??? test -parallel 1 -v ./...'
