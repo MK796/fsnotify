@@ -131,17 +131,6 @@ func (w *fen) recursiveOwnersFor(path string) []string {
 	return out
 }
 
-func (w *fen) isRecursivelyOwned(path string) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for owner := range w.owners[path] {
-		if _, ok := w.recurse[owner]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 func (w *fen) opForOwners(owners []string) Op {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -490,11 +479,10 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
-			if w.isRecursivelyOwned(path) && !w.sendEvent(Event{Name: path, Op: Write}) {
+		} else {
+			if !w.sendEvent(Event{Name: path, Op: Write}) {
 				return nil
 			}
-		} else if !w.sendEvent(Event{Name: path, Op: Write}) {
-			return nil
 		}
 	}
 	if events&unix.FILE_ATTRIB != 0 && stat != nil {
