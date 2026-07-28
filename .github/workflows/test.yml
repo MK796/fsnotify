@@ -40,13 +40,15 @@ jobs:
       - name: test
         run: |
           go version
-          go test -parallel 1 -race    ./...
-
-          $Env:FSNOTIFY_BUFFER = 4096
-          go test -parallel 1 -race    ./...
-
-          $Env:FSNOTIFY_DEBUG = 1
-          go test -parallel 1 -race -v ./...
+          go test -parallel 1 -race ./...
+      - name: test (buffered)
+        env:
+          FSNOTIFY_BUFFER: 4096
+        run: go test -parallel 1 -race ./...
+      - name: test (debug)
+        env:
+          FSNOTIFY_DEBUG: 1
+        run: go test -parallel 1 -race -v ./...
 
   macos:
     name: 'test'
