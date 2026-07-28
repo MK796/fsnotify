@@ -638,7 +638,7 @@ func isSolaris() bool {
 
 func supportsRecurse(t *testing.T) {
 	switch runtime.GOOS {
-	case "windows", "linux", "solaris",
+	case "windows", "linux", "illumos", "solaris",
 		"darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		// Run test.
 	default:
