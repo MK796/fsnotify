@@ -5,9 +5,9 @@ skip windows # TODO: see comment in rename-prefix
 mkdir -p /sub/dir
 watch /...
 
-watchlist / /sub /sub/dir
+watchlist /
 mv /sub /sub-rename
-watchlist / /sub-rename /sub-rename/dir
+watchlist /
 
 touch /sub-rename/file
 touch /sub-rename/dir/file

@@ -24,9 +24,9 @@ mkdir -p /a/sub
 mkdir -p /ab/sub
 watch /...
 
-watchlist / /a /a/sub /ab /ab/sub
+watchlist /
 mv /a /x
-watchlist / /x /x/sub /ab /ab/sub
+watchlist /
 
 Output:
 	rename   /a
