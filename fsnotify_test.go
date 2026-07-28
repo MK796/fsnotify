@@ -19,6 +19,44 @@ import (
 	"github.com/fsnotify/fsnotify/internal"
 )
 
+func TestHasPathPrefix(t *testing.T) {
+	var (
+		root     string
+		child    string
+		sibling string
+	)
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+		child = `C:\child`
+		sibling = `D:\child`
+	} else {
+		root = `/`
+		child = `/child`
+		sibling = `/other`
+	}
+
+	tests := []struct {
+		name string
+		path string
+		root string
+		want bool
+	}{
+		{"same path", filepath.Join(root, "dir"), filepath.Join(root, "dir"), true},
+		{"child", filepath.Join(root, "dir", "child"), filepath.Join(root, "dir"), true},
+		{"component sibling", filepath.Join(root, "directory"), filepath.Join(root, "dir"), false},
+		{"filesystem root", child, root, true},
+		{"different root", sibling, root, runtime.GOOS != "windows"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasPathPrefix(tt.path, tt.root); got != tt.want {
+				t.Fatalf("hasPathPrefix(%q, %q) = %t; want %t", tt.path, tt.root, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestScript(t *testing.T) {
 	err := filepath.Walk("./testdata", func(path string, info fs.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
