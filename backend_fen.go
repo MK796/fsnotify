@@ -178,6 +178,33 @@ func (w *fen) dropAssociation(path string) error {
 	return nil
 }
 
+func (w *fen) dropPhysical(path string, tree bool) {
+	w.mu.Lock()
+	var paths []string
+	for tracked := range w.owners {
+		if tracked == path || (tree && hasPathPrefix(tracked, path)) {
+			paths = append(paths, tracked)
+			delete(w.dirs, tracked)
+			delete(w.watches, tracked)
+			delete(w.owners, tracked)
+		}
+	}
+	for userPath := range w.byUser {
+		if userPath == path || (tree && hasPathPrefix(userPath, path)) {
+			delete(w.byUser, userPath)
+			delete(w.recurse, userPath)
+		}
+	}
+	w.mu.Unlock()
+
+	for _, tracked := range paths {
+		if tracked == path || !w.port.PathIsWatched(tracked) {
+			continue
+		}
+		_ = w.port.DissociatePath(tracked)
+	}
+}
+
 func (w *fen) AddWith(name string, opts ...addOpt) error {
 	if w.isClosed() {
 		return ErrClosed
@@ -408,16 +435,7 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 
 	// The file is gone, nothing left to do.
 	if !reRegister {
-		if watchedDir {
-			w.mu.Lock()
-			delete(w.dirs, path)
-			w.mu.Unlock()
-		}
-		if watchedPath {
-			w.mu.Lock()
-			delete(w.watches, path)
-			w.mu.Unlock()
-		}
+		w.dropPhysical(path, fmode.IsDir())
 		return nil
 	}
 
@@ -436,6 +454,7 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		if !w.sendEvent(Event{Name: path, Op: Remove}) {
 			return nil
 		}
+		w.dropPhysical(path, fmode.IsDir())
 		// Suppress extra write events on removed directories; they are not
 		// informative and can be confusing.
 		return nil
@@ -460,10 +479,9 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
-		} else {
-			if !w.sendEvent(Event{Name: path, Op: Write}) {
-				return nil
-			}
+		}
+		if !w.sendEvent(Event{Name: path, Op: Write}) {
+			return nil
 		}
 	}
 	if events&unix.FILE_ATTRIB != 0 && stat != nil {
