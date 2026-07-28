@@ -47,7 +47,7 @@ Output:
 	remove      /watch/j
 	remove      /watch
 
-	linux:  # Same as Windows, but without those stupid dir writes Windows sends.
+	linux, fen:  # Backends that suppress redundant directory writes.
 		remove      /watch/a
 		remove      /watch/b
 		remove      /watch/c

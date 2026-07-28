@@ -28,7 +28,7 @@ Output:
 	create   /sub/dir/newdir/file
 	write    /sub/dir/newdir/file
 
-	linux:  # Same as Windows, but without those stupid dir writes Windows sends.
+	linux, fen:  # Backends that suppress redundant directory writes.
 		create   /sub/dir/newdir
 		create   /sub/dir/newdir/file
 		remove   /sub/dir/newdir/file
