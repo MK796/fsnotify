@@ -389,17 +389,64 @@ func (w *eventCollector) stop(t *testing.T) Events {
 func (w *eventCollector) stopWait(t *testing.T, waitFor time.Duration) Events {
 	waitForEvents()
 
+	closeResult := make(chan error, 1)
 	go func() {
-		err := w.w.Close()
-		if err != nil {
-			t.Error(err)
-		}
+		closeResult <- w.w.Close()
 	}()
 
-	select {
-	case <-time.After(waitFor):
-		t.Fatalf("event stream was not closed after %s", waitFor)
-	case <-w.done:
+	timer := time.NewTimer(waitFor)
+	defer timer.Stop()
+
+	var (
+		closeC   <-chan error    = closeResult
+		streamC  <-chan struct{} = w.done
+		closeErr error
+	)
+	for closeC != nil || streamC != nil {
+		select {
+		case closeErr = <-closeC:
+			closeC = nil
+		case <-streamC:
+			streamC = nil
+		case <-timer.C:
+			// A timer and the completion channels can become ready together.
+			// Give already-ready completions priority without extending the
+			// deadline.
+			if closeC != nil {
+				select {
+				case closeErr = <-closeC:
+					closeC = nil
+				default:
+				}
+			}
+			if streamC != nil {
+				select {
+				case <-streamC:
+					streamC = nil
+				default:
+				}
+			}
+			if closeC == nil && streamC == nil {
+				continue
+			}
+			if reporter, ok := w.w.b.(interface{ testCloseState() string }); ok {
+				t.Logf("backend close state: %s", reporter.testCloseState())
+			}
+			stack := make([]byte, 1<<20)
+			n := runtime.Stack(stack, true)
+			t.Logf("goroutine dump at close timeout:\n%s", stack[:n])
+			switch {
+			case closeC != nil && streamC != nil:
+				t.Fatalf("watcher and event stream were not closed after %s", waitFor)
+			case closeC != nil:
+				t.Fatalf("watcher did not close after %s", waitFor)
+			default:
+				t.Fatalf("watcher closed, but event collector did not observe closed streams after %s", waitFor)
+			}
+		}
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	w.mu.Lock()
@@ -481,6 +528,17 @@ func (e Events) copy() Events {
 	cp := make(Events, len(e))
 	copy(cp, e)
 	return cp
+}
+
+func (e Events) without(op Op) Events {
+	filtered := make(Events, 0, len(e))
+	for _, event := range e {
+		event.Op &^= op
+		if event.Op != 0 {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
 }
 
 // Create a new Events list from a string; for example:
@@ -638,7 +696,8 @@ func isSolaris() bool {
 
 func supportsRecurse(t *testing.T) {
 	switch runtime.GOOS {
-	case "windows", "linux":
+	case "windows", "linux", "illumos", "solaris",
+		"darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		// Run test.
 	default:
 		t.Skip("recursion not yet supported on " + runtime.GOOS)
@@ -743,6 +802,7 @@ func parseScript(t *testing.T, in string) {
 
 	var (
 		repeat  = 1
+		ignore  Op
 		do      = make([]func(*Watcher), 0, len(cmds))
 		mustArg = func(c command, n int) {
 			if len(c.args) != n {
@@ -854,6 +914,24 @@ loop:
 				do = append(do, func(w *Watcher) { debug = false })
 			default:
 				t.Fatalf("line %d: unknown debug: %q", c.line, c.args[0])
+			}
+		case "ignore":
+			atleastArg(c, 1)
+			for _, op := range c.args {
+				switch strings.ToLower(op) {
+				case "create":
+					ignore |= Create
+				case "write":
+					ignore |= Write
+				case "remove":
+					ignore |= Remove
+				case "rename":
+					ignore |= Rename
+				case "chmod":
+					ignore |= Chmod
+				default:
+					t.Fatalf("line %d: unknown ignored operation: %q", c.line, op)
+				}
 			}
 		case "stop":
 			mustArg(c, 0)
@@ -1026,8 +1104,8 @@ loop:
 		for _, d := range do {
 			d(w.w)
 		}
-		ev := w.stop(t)
-		cmpEvents(t, tmp, ev, newEvents(t, want))
+		ev := w.stop(t).without(ignore)
+		cmpEvents(t, tmp, ev, newEvents(t, want).without(ignore))
 	}
 
 	if repeat == 1 {

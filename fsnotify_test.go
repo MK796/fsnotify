@@ -19,8 +19,42 @@ import (
 	"github.com/fsnotify/fsnotify/internal"
 )
 
-func init() {
-	enableRecurse = true
+func TestHasPathPrefix(t *testing.T) {
+	var (
+		root    string
+		child   string
+		sibling string
+	)
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+		child = `C:\child`
+		sibling = `D:\child`
+	} else {
+		root = `/`
+		child = `/child`
+		sibling = `/other`
+	}
+
+	tests := []struct {
+		name string
+		path string
+		root string
+		want bool
+	}{
+		{"same path", filepath.Join(root, "dir"), filepath.Join(root, "dir"), true},
+		{"child", filepath.Join(root, "dir", "child"), filepath.Join(root, "dir"), true},
+		{"component sibling", filepath.Join(root, "directory"), filepath.Join(root, "dir"), false},
+		{"filesystem root", child, root, true},
+		{"different root", sibling, root, runtime.GOOS != "windows"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasPathPrefix(tt.path, tt.root); got != tt.want {
+				t.Fatalf("hasPathPrefix(%q, %q) = %t; want %t", tt.path, tt.root, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestScript(t *testing.T) {
@@ -860,6 +894,17 @@ func TestEventString(t *testing.T) {
 }
 
 func TestWatchList(t *testing.T) {
+	check := func(t *testing.T, w *Watcher, want ...string) {
+		t.Helper()
+
+		have := w.WatchList()
+		sort.Strings(have)
+		sort.Strings(want)
+		if !slices.Equal(have, want) {
+			t.Errorf("\nhave: %q\nwant: %q", have, want)
+		}
+	}
+
 	t.Run("works", func(t *testing.T) {
 		t.Parallel()
 
@@ -873,11 +918,144 @@ func TestWatchList(t *testing.T) {
 		w := newWatcher(t, file, tmp)
 		defer w.Close()
 
-		have := w.WatchList()
-		sort.Strings(have)
-		want := []string{tmp, file}
-		if !slices.Equal(have, want) {
-			t.Errorf("\nhave: %s\nwant: %s", have, want)
+		check(t, w, tmp, file)
+	})
+
+	t.Run("recursive root only", func(t *testing.T) {
+		supportsRecurse(t)
+		t.Parallel()
+
+		tmp := t.TempDir()
+		child := join(tmp, "a")
+		mkdir(t, child)
+		mkdir(t, child, "b")
+
+		w := newWatcher(t, join(tmp, "..."))
+		defer w.Close()
+
+		check(t, w, tmp)
+	})
+
+	t.Run("overlapping recursive roots", func(t *testing.T) {
+		supportsRecurse(t)
+		t.Parallel()
+
+		tmp := t.TempDir()
+		inner := join(tmp, "a")
+		mkdir(t, inner)
+		mkdir(t, inner, "b")
+
+		w := newWatcher(t, join(tmp, "..."), join(inner, "..."))
+		defer w.Close()
+
+		check(t, w, tmp, inner)
+		if err := w.Remove(join(tmp, "...")); err != nil {
+			t.Fatal(err)
+		}
+		check(t, w, inner)
+		if err := w.Remove(join(inner, "...")); err != nil {
+			t.Fatal(err)
+		}
+		check(t, w)
+	})
+
+	t.Run("explicit child outlives recursive root", func(t *testing.T) {
+		supportsRecurse(t)
+		t.Parallel()
+
+		tmp := t.TempDir()
+		child := join(tmp, "a")
+		mkdir(t, child)
+
+		w := newWatcher(t, join(tmp, "..."), child)
+		defer w.Close()
+
+		check(t, w, tmp, child)
+		if err := w.Remove(join(tmp, "...")); err != nil {
+			t.Fatal(err)
+		}
+		check(t, w, child)
+		if err := w.Remove(child); err != nil {
+			t.Fatal(err)
+		}
+		check(t, w)
+	})
+
+	t.Run("recursive root automatically removed", func(t *testing.T) {
+		supportsRecurse(t)
+		t.Parallel()
+
+		root := join(t.TempDir(), "root")
+		mkdir(t, root)
+		mkdir(t, root, "child")
+
+		w := newWatcher(t, join(root, "..."))
+		defer w.Close()
+		check(t, w, root)
+
+		if err := os.RemoveAll(root); err != nil {
+			t.Fatal(err)
+		}
+
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+		for len(w.WatchList()) != 0 {
+			select {
+			case err := <-w.Errors:
+				t.Fatal(err)
+			case <-w.Events:
+			case <-timeout.C:
+				if have := w.WatchList(); len(have) != 0 {
+					t.Fatalf("WatchList after recursive root removal: %q; want empty", have)
+				}
+			}
+		}
+
+		if err := w.Remove(root); !errors.Is(err, ErrNonExistentWatch) {
+			t.Fatalf("Remove after automatic removal: %T %v; want ErrNonExistentWatch", err, err)
+		}
+	})
+
+	t.Run("recursive descendant automatically removed on ancestor rename", func(t *testing.T) {
+		supportsRecurse(t)
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows cannot rename an ancestor containing a separately watched descendant")
+		}
+		t.Parallel()
+
+		root := join(t.TempDir(), "root")
+		ancestor := join(root, "ancestor")
+		descendant := join(ancestor, "descendant")
+		renamed := join(root, "renamed")
+		mkdirAll(t, descendant)
+
+		w := newWatcher(t, join(root, "..."), join(descendant, "..."))
+		defer w.Close()
+		check(t, w, root, descendant)
+
+		if err := os.Rename(ancestor, renamed); err != nil {
+			t.Fatal(err)
+		}
+
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+		for {
+			have := w.WatchList()
+			if len(have) == 1 && have[0] == root {
+				break
+			}
+
+			select {
+			case err := <-w.Errors:
+				t.Fatal(err)
+			case <-w.Events:
+			case <-timeout.C:
+				t.Fatalf("WatchList after ancestor rename: %q; want %q", have, []string{root})
+			}
+		}
+
+		if err := w.Remove(descendant); !errors.Is(err, ErrNonExistentWatch) {
+			t.Fatalf("Remove descendant after ancestor rename: %T %v; want ErrNonExistentWatch", err, err)
 		}
 	})
 
@@ -1106,7 +1284,7 @@ func TestRace(t *testing.T) {
 	t.Run("remove self", func(t *testing.T) {
 		t.Parallel()
 
-		// TODO: seems to hang forever on Windows; possibly related to:
+		// This used to hang forever on Windows; possibly related to:
 		// https://github.com/fsnotify/fsnotify/issues/656
 		//
 		// Although it seems to be on different points:
@@ -1141,12 +1319,6 @@ func TestRace(t *testing.T) {
 		//   created by github.com/fsnotify/fsnotify.(*eventCollector).collect in goroutine 8
 		//          C:/Users/martin/fsnotify/helpers_test.go:427 +0x67
 		//
-		// The Windows backend hasn't really changed in a long time, so old
-		// problem, and not something we need to fix right now.
-		if runtime.GOOS == "windows" {
-			t.Skip("hangs on windows")
-		}
-
 		// TODO: sometimes hands on "unix.Close(info.wd)" in kqueue.remove().
 		// Only seems to happen on macOS and not the other kqueue platforms.
 		//

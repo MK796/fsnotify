@@ -1,7 +1,3 @@
-# TODO: frequently (but not always) hangs in the CI until it gets killed. Not
-# sure what's going on – can't reproduce locally.
-skip windows
-
 # Make sure RenamedFrom is set when renaming from one directory to another.
 require recurse
 
@@ -17,7 +13,7 @@ Output:
 	rename   /dir1/file
 	create   /dir2/rename ← /dir1/file
 
-	windows:  # TODO: Windows sends these stupid writes
+	windows:  # ReadDirectoryChangesW reports cross-directory moves separately.
 		remove   /dir1/file
 		create   /dir2/rename
 		write    /dir2

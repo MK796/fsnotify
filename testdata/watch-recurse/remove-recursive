@@ -24,6 +24,6 @@ Output:
 	write /dir2/subdir
 	write /dir2/subdir/file
 
-	linux:  # Same as Windows, but without those stupid dir writes Windows sends.
+	linux, kqueue, fen:  # These backends don't expose directory writes.
 		write /dir1/subdir/file
 		write /dir2/subdir/file

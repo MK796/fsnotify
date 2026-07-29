@@ -1,0 +1,17 @@
+# Recursive operation filters must not prevent new directories from being
+# registered. Structural events are consumed internally but not reported.
+require recurse
+require filter
+
+mkdir -p /existing
+touch /existing/file
+watch /... write
+
+mkdir -p /new/deep
+touch /new/deep/file
+echo new >>/new/deep/file
+echo existing >>/existing/file
+
+Output:
+	write   /new/deep/file
+	write   /existing/file

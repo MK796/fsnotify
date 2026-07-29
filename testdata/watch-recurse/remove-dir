@@ -24,7 +24,7 @@ Output:
 	write  /sub
 	remove /sub
 
-	linux:  # Same as Windows, but without those stupid dir writes Windows sends.
+	linux, kqueue, fen:  # These backends don't expose directory writes.
 		create   /sub/dir/file
 		write    /sub/dir/file
 

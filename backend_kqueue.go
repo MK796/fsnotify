@@ -5,9 +5,9 @@ package fsnotify
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -21,36 +21,45 @@ type kqueue struct {
 	Events chan Event
 	Errors chan error
 
-	kq        int    // File descriptor (as returned by the kqueue() syscall).
-	closepipe [2]int // Pipe used for closing kq.
+	kq        int        // File descriptor (as returned by the kqueue() syscall).
+	closepipe [2]int     // Pipe used for closing kq.
+	watchMu   sync.Mutex // Serializes descriptor registration and removal.
 	watches   *watches
 }
 
 type (
 	watches struct {
-		mu     sync.RWMutex
-		wd     map[int]watch               // wd → watch
-		path   map[string]int              // pathname → wd
-		byDir  map[string]map[int]struct{} // dirname(path) → wd
-		seen   map[string]struct{}         // Keep track of if we know this file exists.
-		byUser map[string]struct{}         // Watches added with Watcher.Add()
+		mu      sync.RWMutex
+		wd      map[int]watch                  // wd → watch
+		path    map[string]int                 // pathname → wd
+		byDir   map[string]map[int]struct{}    // dirname(path) → wd
+		seen    map[string]struct{}            // Keep track of if we know this file exists.
+		byUser  map[string]struct{}            // Watches added with Watcher.Add()
+		target  map[string]string              // user path → physical watched path
+		recurse map[string]Op                  // Root paths → Op for recursive watches
+		owners  map[string]map[string]struct{} // watched path → explicit Add roots
 	}
 	watch struct {
-		wd       int
-		name     string
-		linkName string // In case of links; name is the target, and this is the link.
-		isDir    bool
-		dirFlags uint32
+		wd         int
+		name       string
+		linkName   string // In case of links; name is the target, and this is the link.
+		fileInfo   os.FileInfo
+		isDir      bool
+		dirFlags   uint32
+		skipRename bool
 	}
 )
 
 func newWatches() *watches {
 	return &watches{
-		wd:     make(map[int]watch),
-		path:   make(map[string]int),
-		byDir:  make(map[string]map[int]struct{}),
-		seen:   make(map[string]struct{}),
-		byUser: make(map[string]struct{}),
+		wd:      make(map[int]watch),
+		path:    make(map[string]int),
+		byDir:   make(map[string]map[int]struct{}),
+		seen:    make(map[string]struct{}),
+		byUser:  make(map[string]struct{}),
+		target:  make(map[string]string),
+		recurse: make(map[string]Op),
+		owners:  make(map[string]map[string]struct{}),
 	}
 }
 
@@ -88,10 +97,128 @@ func (w *watches) watchesInDir(path string) []string {
 }
 
 // Mark path as added by the user.
-func (w *watches) addUserWatch(path string) {
+func (w *watches) addUserWatch(path, target string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.byUser[path] = struct{}{}
+	w.target[path] = target
+}
+
+func (w *watches) hasUserWatch(path string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	_, ok := w.byUser[path]
+	return ok
+}
+
+func (w *watches) addOwnerTree(path, owner string, recursive bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for watched := range w.path {
+		owned := watched == path
+		if recursive {
+			owned = owned || hasPathPrefix(watched, path)
+		} else {
+			owned = owned || filepath.Dir(watched) == path
+		}
+		if !owned {
+			continue
+		}
+		owners := w.owners[watched]
+		if owners == nil {
+			owners = make(map[string]struct{}, 1)
+			w.owners[watched] = owners
+		}
+		owners[owner] = struct{}{}
+	}
+}
+
+func (w *watches) addOwner(path, owner string) {
+	if path == "" {
+		return
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	owners := w.owners[path]
+	if owners == nil {
+		owners = make(map[string]struct{}, 1)
+		w.owners[path] = owners
+	}
+	owners[owner] = struct{}{}
+}
+
+func (w *watches) ownersFor(path string) []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	owners := w.owners[path]
+	out := make([]string, 0, len(owners))
+	for owner := range owners {
+		out = append(out, owner)
+	}
+	return out
+}
+
+func (w *watches) recursiveOwnersFor(path string) []string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	var owners []string
+	for owner := range w.recurse {
+		target, ok := w.target[owner]
+		if !ok {
+			continue
+		}
+		if path == target || hasPathPrefix(path, target) {
+			owners = append(owners, owner)
+		}
+	}
+	return owners
+}
+
+func (w *watches) releaseOwner(owner string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	target := w.target[owner]
+	released := make(map[string]struct{}, 1)
+	for path, watched := range w.target {
+		if watched == target {
+			released[path] = struct{}{}
+			delete(w.byUser, path)
+			delete(w.target, path)
+			delete(w.recurse, path)
+		}
+	}
+
+	var unused []string
+	for path, owners := range w.owners {
+		for releasedOwner := range released {
+			delete(owners, releasedOwner)
+		}
+		if len(owners) == 0 {
+			unused = append(unused, path)
+		}
+	}
+	sort.Slice(unused, func(i, j int) bool {
+		return len(unused[i]) > len(unused[j])
+	})
+	return unused
+}
+
+func (w *watches) removeRootsUnder(path string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for root, target := range w.target {
+		if target == path || hasPathPrefix(target, path) {
+			delete(w.byUser, root)
+			delete(w.target, root)
+			delete(w.recurse, root)
+		}
+	}
 }
 
 func (w *watches) addLink(path string, fd int) {
@@ -102,12 +229,18 @@ func (w *watches) addLink(path string, fd int) {
 	w.seen[path] = struct{}{}
 }
 
-func (w *watches) add(path, linkPath string, fd int, isDir bool) {
+func (w *watches) add(path, linkPath string, fd int, fi os.FileInfo) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	w.path[path] = fd
-	w.wd[fd] = watch{wd: fd, name: path, linkName: linkPath, isDir: isDir}
+	w.wd[fd] = watch{
+		wd:       fd,
+		name:     path,
+		linkName: linkPath,
+		fileInfo: fi,
+		isDir:    fi.IsDir(),
+	}
 
 	parent := filepath.Dir(path)
 	byDir, ok := w.byDir[parent]
@@ -163,6 +296,7 @@ func (w *watches) remove(fd int, path string) bool {
 
 	delete(w.wd, fd)
 	delete(w.seen, path)
+	delete(w.owners, path)
 	return isDir
 }
 
@@ -181,6 +315,186 @@ func (w *watches) seenBefore(path string) bool {
 	defer w.mu.RUnlock()
 	_, ok := w.seen[path]
 	return ok
+}
+
+func (w *watches) findRenamedDir(path string, fi os.FileInfo) (string, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	for oldPath, fd := range w.path {
+		info, ok := w.wd[fd]
+		if !ok || !info.isDir || info.fileInfo == nil || oldPath == path {
+			continue
+		}
+		if _, ok := w.byUser[oldPath]; ok {
+			continue
+		}
+		if _, ok := w.recurse[oldPath]; ok {
+			continue
+		}
+		if !w.isUnderRecurseLocked(oldPath) {
+			continue
+		}
+		if os.SameFile(info.fileInfo, fi) {
+			return oldPath, true
+		}
+	}
+	return "", false
+}
+
+func (w *watches) rebase(oldPath, newPath string, destinationOwners []string) (bool, []string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	rootFD, ok := w.path[oldPath]
+	if !ok {
+		return false, nil
+	}
+
+	type move struct {
+		from string
+		to   string
+		fd   int
+	}
+	var moved []move
+	moving := make(map[string]struct{})
+	for path, fd := range w.path {
+		if path == oldPath || hasPathPrefix(path, oldPath) {
+			moved = append(moved, move{
+				from: path,
+				to:   newPath + path[len(oldPath):],
+				fd:   fd,
+			})
+			moving[path] = struct{}{}
+		}
+	}
+	for _, move := range moved {
+		if _, exists := w.path[move.to]; exists {
+			if _, willMove := moving[move.to]; !willMove {
+				return false, nil
+			}
+		}
+	}
+
+	// Explicit watches are removed on rename. Physical watches in the moved
+	// subtree survive only through recursive roots that cover the destination.
+	renamedOwners := make(map[string]struct{})
+	for owner, target := range w.target {
+		if target == oldPath || hasPathPrefix(target, oldPath) {
+			renamedOwners[owner] = struct{}{}
+			delete(w.byUser, owner)
+			delete(w.target, owner)
+			delete(w.recurse, owner)
+		}
+	}
+
+	newOwners := make(map[string]struct{}, len(destinationOwners))
+	for _, owner := range destinationOwners {
+		if _, recursive := w.recurse[owner]; recursive {
+			newOwners[owner] = struct{}{}
+		}
+	}
+
+	var unused []string
+	for path, owners := range w.owners {
+		if path == oldPath || hasPathPrefix(path, oldPath) {
+			continue
+		}
+		for owner := range renamedOwners {
+			delete(owners, owner)
+		}
+		if len(owners) == 0 {
+			unused = append(unused, path)
+		}
+	}
+
+	if len(newOwners) == 0 {
+		for _, move := range moved {
+			unused = append(unused, move.from)
+		}
+		for path := range w.seen {
+			if path == oldPath || hasPathPrefix(path, oldPath) {
+				delete(w.seen, path)
+			}
+		}
+	} else {
+		for _, move := range moved {
+			delete(w.path, move.from)
+			delete(w.owners, move.from)
+		}
+		for _, move := range moved {
+			w.path[move.to] = move.fd
+			info, exists := w.wd[move.fd]
+			if exists && info.name == move.from {
+				info.name = move.to
+				if move.fd == rootFD {
+					info.skipRename = true
+				}
+				w.wd[move.fd] = info
+			}
+			owners := make(map[string]struct{}, len(newOwners))
+			for owner := range newOwners {
+				owners[owner] = struct{}{}
+			}
+			w.owners[move.to] = owners
+		}
+		for path := range w.seen {
+			if path != oldPath && !hasPathPrefix(path, oldPath) {
+				continue
+			}
+			delete(w.seen, path)
+			w.seen[newPath+path[len(oldPath):]] = struct{}{}
+		}
+	}
+
+	w.byDir = make(map[string]map[int]struct{})
+	for fd, info := range w.wd {
+		parent := filepath.Dir(info.name)
+		if w.byDir[parent] == nil {
+			w.byDir[parent] = make(map[int]struct{})
+		}
+		w.byDir[parent][fd] = struct{}{}
+	}
+	sort.Slice(unused, func(i, j int) bool {
+		return len(unused[i]) > len(unused[j])
+	})
+	return true, unused
+}
+
+func (w *watches) consumeSkippedRename(fd int) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	info, ok := w.wd[fd]
+	if !ok || !info.skipRename {
+		return false
+	}
+	info.skipRename = false
+	w.wd[fd] = info
+	return true
+}
+
+func (w *watches) isRecurseRoot(path string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	_, ok := w.recurse[path]
+	return ok
+}
+
+func (w *watches) isUnderRecurse(path string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.isUnderRecurseLocked(path)
+}
+
+func (w *watches) isUnderRecurseLocked(path string) bool {
+	for owner := range w.recurse {
+		target, ok := w.target[owner]
+		if ok && (path == target || hasPathPrefix(path, target)) {
+			return true
+		}
+	}
+	return false
 }
 
 var defaultBufferSize = 0
@@ -267,20 +581,97 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 		return fmt.Errorf("%w: %s", xErrUnsupported, with.op)
 	}
 
-	_, err := w.addWatch(name, noteAllEvents, false)
+	name, recurse := recursivePath(name)
+	if w.watches.hasUserWatch(name) {
+		return nil
+	}
+	if recurse {
+		err := filepath.WalkDir(name, func(root string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			var watched string
+			if d.IsDir() {
+				if with.sendCreate && root != name {
+					w.sendEvent(Event{Name: root, Op: Create})
+				}
+				watched, err = w.addWatch(root, noteAllEvents, false, false)
+			} else {
+				if root == name {
+					return fmt.Errorf("fsnotify: not a directory: %q", name)
+				}
+				fi, infoErr := d.Info()
+				if infoErr != nil {
+					return infoErr
+				}
+				watched, err = w.internalWatch(root, fi)
+				if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, os.ErrNotExist) {
+					w.watches.markSeen(filepath.Clean(root), true)
+					return nil
+				}
+			}
+			if err != nil {
+				return err
+			}
+			w.watches.addOwner(watched, name)
+			if watched == "" {
+				watched = filepath.Clean(root)
+			}
+			w.watches.markSeen(watched, true)
+			if root == name {
+				w.watches.addUserWatch(root, watched)
+				w.watches.mu.Lock()
+				w.watches.recurse[name] = with.op
+				w.watches.mu.Unlock()
+			}
+			return nil
+		})
+		if err != nil {
+			for _, path := range w.watches.releaseOwner(name) {
+				_ = w.remove(path, false)
+			}
+			return err
+		}
+		return nil
+	}
+
+	watched, err := w.addWatch(name, noteAllEvents, false, true)
 	if err != nil {
 		return err
 	}
-	w.watches.addUserWatch(name)
+	w.watches.addUserWatch(name, watched)
+	w.watches.addOwnerTree(watched, name, false)
 	return nil
 }
 
 func (w *kqueue) Remove(name string) error {
+	if w.isClosed() {
+		return nil
+	}
 	if debug {
 		fmt.Fprintf(os.Stderr, "FSNOTIFY_DEBUG: %s  Remove(%q)\n",
 			time.Now().Format("15:04:05.000000000"), name)
 	}
-	return w.remove(name, true)
+
+	name, recurse := recursivePath(name)
+
+	if recurse && !w.watches.isRecurseRoot(name) {
+		return fmt.Errorf("can't use /... with non-recursive watch %q", name)
+	}
+	w.watches.mu.RLock()
+	_, byUser := w.watches.byUser[name]
+	w.watches.mu.RUnlock()
+	if !byUser {
+		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
+	}
+
+	var firstErr error
+	for _, path := range w.watches.releaseOwner(name) {
+		if err := w.remove(path, false); err != nil && !errors.Is(err, ErrNonExistentWatch) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (w *kqueue) remove(name string, unwatchFiles bool) error {
@@ -290,22 +681,51 @@ func (w *kqueue) remove(name string, unwatchFiles bool) error {
 	return w.remove2(name, unwatchFiles)
 }
 
+func (w *kqueue) removePhysical(name string, tree bool) {
+	name = filepath.Clean(name)
+	paths := []string{name}
+	if tree {
+		w.watches.mu.RLock()
+		paths = paths[:0]
+		for path := range w.watches.path {
+			if path == name || hasPathPrefix(path, name) {
+				paths = append(paths, path)
+			}
+		}
+		w.watches.mu.RUnlock()
+		sort.Slice(paths, func(i, j int) bool {
+			return len(paths[i]) > len(paths[j])
+		})
+		w.watches.removeRootsUnder(name)
+	}
+
+	for _, path := range paths {
+		_ = w.remove(path, false)
+		w.watches.markSeen(path, false)
+	}
+}
+
 // remove() but without checking isClosed
 func (w *kqueue) remove2(name string, unwatchFiles bool) error {
 	name = filepath.Clean(name)
+
+	w.watchMu.Lock()
 	info, ok := w.watches.byPath(name)
 	if !ok {
+		w.watchMu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
 	}
 
 	err := w.register([]int{info.wd}, unix.EV_DELETE, 0)
 	if err != nil {
+		w.watchMu.Unlock()
 		return err
 	}
 
 	unix.Close(info.wd)
 
 	isDir := w.watches.remove(info.wd, name)
+	w.watchMu.Unlock()
 
 	// Find all watched paths that are in this directory that are not external.
 	if unwatchFiles && isDir {
@@ -326,16 +746,39 @@ func (w *kqueue) WatchList() []string {
 	return w.watches.listPaths(true)
 }
 
-// Watch all events (except NOTE_EXTEND, NOTE_LINK, NOTE_REVOKE)
+// Directory changes are rescanned to synthesize Create events. Some kqueue
+// implementations report entry changes with NOTE_EXTEND or NOTE_LINK instead
+// of NOTE_WRITE.
+const noteDirectoryEvents = unix.NOTE_EXTEND | unix.NOTE_LINK
+
+// Watch all events except NOTE_REVOKE.
 const noteAllEvents = unix.NOTE_DELETE | unix.NOTE_WRITE | unix.NOTE_ATTRIB | unix.NOTE_RENAME
 
 // addWatch adds name to the watched file set; the flags are interpreted as
 // described in kevent(2).
 //
 // Returns the real path to the file which was added, with symlinks resolved.
-func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, error) {
+func (w *kqueue) addWatch(name string, flags uint32, listDir, scanDir bool) (string, error) {
+	w.watchMu.Lock()
+	watched, watchDir, dir, err := w.addWatchDescriptor(name, flags, listDir)
+	w.watchMu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	if scanDir && watchDir {
+		if err := w.watchDirectoryFiles(dir); err != nil {
+			return "", err
+		}
+	}
+	return watched, nil
+}
+
+// addWatchDescriptor registers a descriptor and updates the watch maps while
+// watchMu is held. Directory scans happen afterwards because they recursively
+// register child descriptors.
+func (w *kqueue) addWatchDescriptor(name string, flags uint32, listDir bool) (watched string, watchDir bool, dir string, err error) {
 	if w.isClosed() {
-		return "", ErrClosed
+		return "", false, "", ErrClosed
 	}
 
 	name = filepath.Clean(name)
@@ -344,12 +787,12 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 	if !alreadyWatching {
 		fi, err := os.Lstat(name)
 		if err != nil {
-			return "", err
+			return "", false, "", err
 		}
 
 		// Don't watch sockets or named pipes.
 		if (fi.Mode()&os.ModeSocket == os.ModeSocket) || (fi.Mode()&os.ModeNamedPipe == os.ModeNamedPipe) {
-			return "", nil
+			return "", false, "", nil
 		}
 
 		// Follow symlinks, but only for paths added with Add(), and not paths
@@ -357,7 +800,7 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 		if !listDir && fi.Mode()&os.ModeSymlink == os.ModeSymlink {
 			link, err := os.Readlink(name)
 			if err != nil {
-				return "", err
+				return "", false, "", err
 			}
 			if !filepath.IsAbs(link) {
 				link = filepath.Join(filepath.Dir(name), link)
@@ -368,14 +811,14 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 				// Add to watches so we don't get spurious Create events later
 				// on when we diff the directories.
 				w.watches.addLink(name, 0)
-				return link, nil
+				return link, false, "", nil
 			}
 
 			info.linkName = name
 			name = link
 			fi, err = os.Lstat(name)
 			if err != nil {
-				return "", err
+				return "", false, "", err
 			}
 		}
 
@@ -383,41 +826,42 @@ func (w *kqueue) addWatch(name string, flags uint32, listDir bool) (string, erro
 			return unix.Open(name, openMode, 0)
 		})
 		if err != nil {
-			return "", err
+			return "", false, "", err
 		}
 		info.isDir = fi.IsDir()
+		info.fileInfo = fi
+	}
+	if info.isDir {
+		flags |= noteDirectoryEvents
 	}
 
-	err := w.register([]int{info.wd}, unix.EV_ADD|unix.EV_CLEAR|unix.EV_ENABLE, flags)
+	err = w.register([]int{info.wd}, unix.EV_ADD|unix.EV_CLEAR|unix.EV_ENABLE, flags)
 	if err != nil {
 		unix.Close(info.wd)
-		return "", err
+		return "", false, "", err
 	}
 
 	if !alreadyWatching {
-		w.watches.add(name, info.linkName, info.wd, info.isDir)
+		w.watches.add(name, info.linkName, info.wd, info.fileInfo)
 	}
 
 	// Watch the directory if it has not been watched before, or if it was
 	// watched before, but perhaps only a NOTE_DELETE (watchDirectoryFiles)
 	if info.isDir {
-		watchDir := (flags&unix.NOTE_WRITE) == unix.NOTE_WRITE &&
+		watchDir = (flags&unix.NOTE_WRITE) == unix.NOTE_WRITE &&
 			(!alreadyWatching || (info.dirFlags&unix.NOTE_WRITE) != unix.NOTE_WRITE)
 		if !w.watches.updateDirFlags(name, flags) {
-			return "", nil
+			return "", false, "", nil
 		}
 
 		if watchDir {
-			d := name
+			dir = name
 			if info.linkName != "" {
-				d = info.linkName
-			}
-			if err := w.watchDirectoryFiles(d); err != nil {
-				return "", err
+				dir = info.linkName
 			}
 		}
 	}
-	return name, nil
+	return name, watchDir, dir, nil
 }
 
 // readEvents reads from kqueue and converts the received kevents into
@@ -476,20 +920,36 @@ func (w *kqueue) readEvents() {
 			//
 			// Technically fd 0 is a valid descriptor, so only skip it if
 			// there's no path, and if we're on macOS.
-			if !ok && kevent.Ident == 0 && runtime.GOOS == "darwin" {
+			if !ok {
 				continue
+			}
+
+			if mask&unix.NOTE_RENAME != 0 && w.watches.consumeSkippedRename(wd) {
+				mask &^= unix.NOTE_RENAME
+				if mask == 0 {
+					continue
+				}
 			}
 
 			event := w.newEvent(path.name, path.linkName, mask)
 
-			if event.Has(Rename) || event.Has(Remove) {
-				w.remove(event.Name, false)
+			if event.Has(Rename) {
+				w.removePhysical(event.Name, path.isDir)
+			} else if event.Has(Remove) {
+				_ = w.remove(event.Name, false)
 				w.watches.markSeen(event.Name, false)
 			}
 
-			if path.isDir && event.Has(Write) && !event.Has(Remove) {
-				w.dirChange(event.Name)
-			} else if !w.sendEvent(event) {
+			rescanDir := path.isDir &&
+				mask&(noteDirectoryEvents|unix.NOTE_WRITE) != 0 &&
+				!event.Has(Remove)
+			if rescanDir {
+				if !w.sendError(w.dirChange(event.Name)) {
+					return
+				}
+				event.Op &^= Write
+			}
+			if !w.sendEvent(event) {
 				return
 			}
 
@@ -523,7 +983,7 @@ func (w *kqueue) readEvents() {
 				} else {
 					path := filepath.Clean(event.Name)
 					if fi, err := os.Lstat(path); err == nil {
-						err := w.sendCreateIfNew(path, fi)
+						err := w.sendCreateIfNew(path, fi, w.watches.ownersFor(filepath.Dir(path)))
 						if !w.sendError(err) {
 							return
 						}
@@ -622,7 +1082,7 @@ func (w *kqueue) dirChange(dir string) error {
 			return fmt.Errorf("fsnotify.dirChange: %w", err)
 		}
 
-		err = w.sendCreateIfNew(filepath.Join(dir, fi.Name()), fi)
+		err = w.sendCreateIfNew(filepath.Join(dir, fi.Name()), fi, w.watches.ownersFor(dir))
 		if err != nil {
 			// Don't need to send an error if this file isn't readable.
 			if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, os.ErrNotExist) {
@@ -636,19 +1096,93 @@ func (w *kqueue) dirChange(dir string) error {
 
 // Send a create event if the file isn't already being tracked, and start
 // watching this file.
-func (w *kqueue) sendCreateIfNew(path string, fi os.FileInfo) error {
-	if !w.watches.seenBefore(path) {
+func (w *kqueue) sendCreateIfNew(path string, fi os.FileInfo, owners []string) error {
+	isNew := !w.watches.seenBefore(path)
+	if isNew && fi.IsDir() && w.watches.isUnderRecurse(path) {
+		recursiveOwners := w.watches.recursiveOwnersFor(path)
+		if oldPath, ok := w.watches.findRenamedDir(path, fi); ok {
+			if rebased, unused := w.watches.rebase(oldPath, path, recursiveOwners); rebased {
+				for _, unusedPath := range unused {
+					err := w.remove(unusedPath, false)
+					if err != nil && !errors.Is(err, ErrNonExistentWatch) {
+						return err
+					}
+				}
+				if !w.sendEvent(Event{Name: oldPath, Op: Rename}) {
+					return nil
+				}
+				if !w.sendEvent(Event{Name: path, Op: Create}) {
+					return nil
+				}
+				return nil
+			}
+		}
+	}
+
+	if isNew {
 		if !w.sendEvent(Event{Name: path, Op: Create}) {
 			return nil
 		}
 	}
 
-	// Like watchDirectoryFiles, but without doing another ReadDir.
+	if isNew && fi.IsDir() && w.watches.isUnderRecurse(path) {
+		return w.addRecursiveSubdir(path, w.watches.recursiveOwnersFor(path))
+	}
+
 	path, err := w.internalWatch(path, fi)
 	if err != nil {
 		return err
 	}
+	for _, owner := range owners {
+		w.watches.addOwnerTree(path, owner, fi.IsDir())
+	}
 	w.watches.markSeen(path, true)
+	return nil
+}
+
+func (w *kqueue) addRecursiveSubdir(root string, owners []string) error {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			cleanPath, err := w.internalWatch(path, fi)
+			if err != nil {
+				if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) {
+					cleanPath = filepath.Clean(path)
+				} else {
+					return err
+				}
+			} else {
+				for _, owner := range owners {
+					w.watches.addOwner(cleanPath, owner)
+				}
+			}
+			w.watches.markSeen(cleanPath, true)
+			return nil
+		}
+		if path != root {
+			if !w.sendEvent(Event{Name: path, Op: Create}) {
+				return nil
+			}
+		}
+		watched, err := w.addWatch(path, noteAllEvents, false, false)
+		if err != nil {
+			return err
+		}
+		for _, owner := range owners {
+			w.watches.addOwner(watched, owner)
+		}
+		w.watches.markSeen(watched, true)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -657,11 +1191,11 @@ func (w *kqueue) internalWatch(name string, fi os.FileInfo) (string, error) {
 		// mimic Linux providing delete events for subdirectories, but preserve
 		// the flags used if currently watching subdirectory
 		info, _ := w.watches.byPath(name)
-		return w.addWatch(name, info.dirFlags|unix.NOTE_DELETE|unix.NOTE_RENAME, true)
+		return w.addWatch(name, info.dirFlags|unix.NOTE_DELETE|unix.NOTE_RENAME, true, false)
 	}
 
 	// Watch file to mimic Linux inotify.
-	return w.addWatch(name, noteAllEvents, true)
+	return w.addWatch(name, noteAllEvents, true, false)
 }
 
 // Register events with the queue.

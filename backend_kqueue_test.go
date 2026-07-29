@@ -8,6 +8,7 @@ package fsnotify
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -104,4 +105,157 @@ func TestRemoveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 0)
+}
+
+func TestRecursiveMoveOutDropsInternalWatches(t *testing.T) {
+	tmp := t.TempDir()
+	root := join(tmp, "root")
+	child := join(root, "child")
+	mkdir(t, root)
+	mkdir(t, child)
+	mkdir(t, child, "nested")
+	touch(t, child, "nested", "file")
+
+	collector := newCollector(t, join(root, "..."))
+	collector.collect(t)
+	kq := collector.w.b.(*kqueue)
+
+	if err := os.Rename(child, join(tmp, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	waitForEvents()
+
+	kq.watches.mu.RLock()
+	for path := range kq.watches.path {
+		if path == child || hasPathPrefix(path, child) {
+			t.Errorf("stale watch after moving directory out of recursive root: %q", path)
+		}
+	}
+	kq.watches.mu.RUnlock()
+
+	collector.stop(t)
+}
+
+func TestKqueueRebaseDropsRenamedExplicitOwners(t *testing.T) {
+	const (
+		outer      = "/root"
+		oldPath    = "/root/ancestor"
+		descendant = "/root/ancestor/descendant"
+		nested     = "/root/ancestor/descendant/nested"
+		newPath    = "/root/renamed"
+	)
+
+	watches := newWatches()
+	watches.byUser[outer] = struct{}{}
+	watches.byUser[descendant] = struct{}{}
+	watches.target[outer] = outer
+	watches.target[descendant] = descendant
+	watches.recurse[outer] = Create | Remove | Rename
+	watches.recurse[descendant] = Create | Remove | Rename
+
+	for i, path := range []string{outer, oldPath, descendant, nested} {
+		fd := i + 10
+		watches.path[path] = fd
+		watches.wd[fd] = watch{wd: fd, name: path, isDir: true}
+		watches.seen[path] = struct{}{}
+		watches.owners[path] = map[string]struct{}{outer: {}}
+		if path == descendant || hasPathPrefix(path, descendant) {
+			watches.owners[path][descendant] = struct{}{}
+		}
+	}
+
+	rebased, unused := watches.rebase(oldPath, newPath, []string{outer, descendant})
+	if !rebased {
+		t.Fatal("rebase failed")
+	}
+	if len(unused) != 0 {
+		t.Fatalf("rebase returned unused watches: %q", unused)
+	}
+
+	if got := watches.listPaths(true); len(got) != 1 || got[0] != outer {
+		t.Fatalf("explicit watches after rebase: %q; want [%q]", got, outer)
+	}
+	if _, ok := watches.target[descendant]; ok {
+		t.Fatalf("target for renamed explicit descendant %q was retained", descendant)
+	}
+	if _, ok := watches.recurse[descendant]; ok {
+		t.Fatalf("recursive state for renamed explicit descendant %q was retained", descendant)
+	}
+
+	for _, old := range []string{oldPath, descendant, nested} {
+		if _, ok := watches.path[old]; ok {
+			t.Errorf("old physical watch path was retained: %q", old)
+		}
+	}
+	for _, current := range []string{
+		newPath,
+		newPath + "/descendant",
+		newPath + "/descendant/nested",
+	} {
+		fd, ok := watches.path[current]
+		if !ok {
+			t.Errorf("rebased physical watch is missing: %q", current)
+			continue
+		}
+		if info := watches.wd[fd]; info.name != current {
+			t.Errorf("descriptor path after rebase: %q; want %q", info.name, current)
+		}
+		owners := watches.owners[current]
+		if len(owners) != 1 {
+			t.Errorf("owners for %q: %v; want only %q", current, owners, outer)
+			continue
+		}
+		if _, ok := owners[outer]; !ok {
+			t.Errorf("outer recursive owner missing for %q", current)
+		}
+	}
+}
+
+func TestRecursiveAddRollback(t *testing.T) {
+	tmp := t.TempDir()
+	root := join(tmp, "root")
+	allowed := join(root, "a-allowed")
+	denied := join(root, "z-denied")
+	mkdir(t, root)
+	mkdir(t, allowed)
+	touch(t, allowed, "file")
+	mkdir(t, denied)
+	if err := os.Chmod(denied, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(denied, 0o755)
+	})
+
+	w := newWatcher(t)
+	if err := w.Add(join(root, "...")); err == nil {
+		t.Fatal("recursive Add succeeded with an unreadable subtree")
+	}
+
+	kq := w.b.(*kqueue)
+	if got := w.WatchList(); len(got) != 0 {
+		t.Fatalf("WatchList after failed recursive Add: %q", got)
+	}
+
+	kq.watches.mu.RLock()
+	defer kq.watches.mu.RUnlock()
+	if len(kq.watches.path) != 0 ||
+		len(kq.watches.wd) != 0 ||
+		len(kq.watches.byDir) != 0 ||
+		len(kq.watches.byUser) != 0 ||
+		len(kq.watches.target) != 0 ||
+		len(kq.watches.recurse) != 0 ||
+		len(kq.watches.owners) != 0 ||
+		len(kq.watches.seen) != 0 {
+		t.Fatalf("watch state retained after failed recursive Add: paths=%d descriptors=%d dirs=%d users=%d targets=%d roots=%d owners=%d seen=%d",
+			len(kq.watches.path),
+			len(kq.watches.wd),
+			len(kq.watches.byDir),
+			len(kq.watches.byUser),
+			len(kq.watches.target),
+			len(kq.watches.recurse),
+			len(kq.watches.owners),
+			len(kq.watches.seen),
+		)
+	}
 }

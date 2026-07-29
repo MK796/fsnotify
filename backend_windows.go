@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -25,13 +24,20 @@ type readDirChangesW struct {
 	Events chan Event
 	Errors chan error
 
-	port  windows.Handle // Handle to completion port
-	input chan *input    // Inputs to the reader are sent on this channel
-	done  chan chan<- error
+	port         windows.Handle    // Handle to completion port
+	input        chan *input       // Inputs to the reader are sent on this channel
+	done         chan struct{}     // Closed to unblock event and error sends
+	closeRequest chan chan<- error // Prioritized shutdown request
+	closeDone    chan struct{}     // Closed after the I/O thread stopped
 
-	mu      sync.Mutex // Protects access to watches, closed
-	watches watchMap   // Map of watches (key: i-number)
-	closed  bool       // Set to true when Close() is first called
+	mu       sync.Mutex // Protects access to watches, closed
+	watches  watchMap   // Map of watches (key: i-number)
+	closed   bool       // Set to true when Close() is first called
+	closeErr error      // Set before closeDone is closed
+
+	// Accessed only by the I/O thread. Every asynchronous read owns a distinct
+	// OVERLAPPED and buffer until its completion has been dequeued.
+	pending map[*windows.Overlapped]*watchOperation
 }
 
 var defaultBufferSize = 50
@@ -42,12 +48,15 @@ func newBackend(ev chan Event, errs chan error) (backend, error) {
 		return nil, os.NewSyscallError("CreateIoCompletionPort", err)
 	}
 	w := &readDirChangesW{
-		Events:  ev,
-		Errors:  errs,
-		port:    port,
-		watches: make(watchMap),
-		input:   make(chan *input, 1),
-		done:    make(chan chan<- error, 1),
+		Events:       ev,
+		Errors:       errs,
+		port:         port,
+		watches:      make(watchMap),
+		pending:      make(map[*windows.Overlapped]*watchOperation),
+		input:        make(chan *input, 1),
+		done:         make(chan struct{}),
+		closeRequest: make(chan chan<- error, 1),
+		closeDone:    make(chan struct{}),
 	}
 	go w.readEvents()
 	return w, nil
@@ -59,6 +68,16 @@ func (w *readDirChangesW) isClosed() bool {
 	return w.closed
 }
 
+func (w *readDirChangesW) markClosed() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return false
+	}
+	w.closed = true
+	return true
+}
+
 func (w *readDirChangesW) sendEvent(name, renamedFrom string, mask uint64) bool {
 	if mask == 0 {
 		return false
@@ -67,11 +86,11 @@ func (w *readDirChangesW) sendEvent(name, renamedFrom string, mask uint64) bool 
 	event := w.newEvent(name, uint32(mask))
 	event.renamedFrom = renamedFrom
 	select {
-	case ch := <-w.done:
-		w.done <- ch
+	case <-w.done:
+		return false
 	case w.Events <- event:
+		return true
 	}
-	return true
 }
 
 // Returns true if the error was sent, or false if watcher is closed.
@@ -88,21 +107,26 @@ func (w *readDirChangesW) sendError(err error) bool {
 }
 
 func (w *readDirChangesW) Close() error {
-	if w.isClosed() {
-		return nil
+	if !w.markClosed() {
+		<-w.closeDone
+		return w.closeErr
 	}
+	close(w.done)
 
-	w.mu.Lock()
-	w.closed = true
-	w.mu.Unlock()
-
-	// Send "done" message to the reader goroutine
-	ch := make(chan error)
-	w.done <- ch
+	reply := make(chan error, 1)
+	w.closeRequest <- reply
 	if err := w.wakeupReader(); err != nil {
-		return err
+		// The I/O thread can consume the close request from an already queued
+		// completion and close the port before this explicit wakeup.
+		if !errors.Is(err, ErrClosed) {
+			w.closeErr = err
+			close(w.closeDone)
+			return err
+		}
 	}
-	return <-ch
+	w.closeErr = <-reply
+	close(w.closeDone)
+	return w.closeErr
 }
 
 func (w *readDirChangesW) Add(name string) error { return w.AddWith(name) }
@@ -128,14 +152,23 @@ func (w *readDirChangesW) AddWith(name string, opts ...addOpt) error {
 		op:      opAddWatch,
 		path:    filepath.Clean(name),
 		flags:   sysFSALLEVENTS,
-		reply:   make(chan error),
+		reply:   make(chan error, 1),
 		bufsize: with.bufsize,
 	}
-	w.input <- in
+	select {
+	case w.input <- in:
+	case <-w.done:
+		return ErrClosed
+	}
 	if err := w.wakeupReader(); err != nil {
 		return err
 	}
-	return <-in.reply
+	select {
+	case err := <-in.reply:
+		return err
+	case <-w.done:
+		return ErrClosed
+	}
 }
 
 func (w *readDirChangesW) Remove(name string) error {
@@ -150,13 +183,25 @@ func (w *readDirChangesW) Remove(name string) error {
 	in := &input{
 		op:    opRemoveWatch,
 		path:  filepath.Clean(name),
-		reply: make(chan error),
+		reply: make(chan error, 1),
 	}
-	w.input <- in
+	select {
+	case w.input <- in:
+	case <-w.done:
+		return nil
+	}
 	if err := w.wakeupReader(); err != nil {
+		if errors.Is(err, ErrClosed) {
+			return nil
+		}
 		return err
 	}
-	return <-in.reply
+	select {
+	case err := <-in.reply:
+		return err
+	case <-w.done:
+		return nil
+	}
 }
 
 func (w *readDirChangesW) WatchList() []string {
@@ -243,14 +288,23 @@ type inode struct {
 }
 
 type watch struct {
-	ov      windows.Overlapped
 	ino     *inode            // i-number
 	recurse bool              // Recursive watch?
 	path    string            // Directory path
 	mask    uint64            // Directory itself is being watched with these notify flags
 	names   map[string]uint64 // Map of names being watched and their notify flags
 	rename  string            // Remembers the old name while renaming a file
-	buf     []byte            // buffer, allocated later
+	bufsize int               // Size used for each asynchronous read buffer
+	buf     []byte            // Reused only after the owning read completed
+	active  *watchOperation   // Read whose completion has not been dequeued
+}
+
+// ov must remain the first field: GetQueuedCompletionStatus returns the
+// address passed to ReadDirectoryChangesW, which is also the operation address.
+type watchOperation struct {
+	ov    windows.Overlapped
+	watch *watch
+	buf   []byte
 }
 
 type (
@@ -259,6 +313,12 @@ type (
 )
 
 func (w *readDirChangesW) wakeupReader() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.port == windows.InvalidHandle {
+		return ErrClosed
+	}
 	err := windows.PostQueuedCompletionStatus(w.port, 0, 0, nil)
 	if err != nil {
 		return os.NewSyscallError("PostQueuedCompletionStatus", err)
@@ -349,6 +409,7 @@ func (w *readDirChangesW) addWatch(pathname string, flags uint64, bufsize int) e
 			path:    dir,
 			names:   make(map[string]uint64),
 			recurse: recurse,
+			bufsize: bufsize,
 			buf:     make([]byte, bufsize),
 		}
 		w.mu.Lock()
@@ -387,10 +448,16 @@ func (w *readDirChangesW) remWatch(pathname string) error {
 
 	dir, err := w.getDir(pathname)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %s", ErrNonExistentWatch, pathname)
+		}
 		return err
 	}
 	ino, err := w.getIno(dir)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %s", ErrNonExistentWatch, pathname)
+		}
 		return err
 	}
 
@@ -431,6 +498,11 @@ func (w *readDirChangesW) remWatch(pathname string) error {
 
 // Must run within the I/O thread.
 func (w *readDirChangesW) deleteWatch(watch *watch) {
+	w.clearWatch(watch, true)
+}
+
+// Must run within the I/O thread.
+func (w *readDirChangesW) clearWatch(watch *watch, notify bool) {
 	// Snapshot+clear under the lock so concurrent WatchList() readers see a
 	// consistent state. sendEvent must run outside the lock since it can
 	// block on the user-facing Events channel.
@@ -441,6 +513,9 @@ func (w *readDirChangesW) deleteWatch(watch *watch) {
 	watch.mask = 0
 	w.mu.Unlock()
 
+	if !notify {
+		return
+	}
 	for name, m := range names {
 		if m&provisional == 0 {
 			w.sendEvent(filepath.Join(watch.path, name), "", m&sysFSIGNORED)
@@ -452,93 +527,299 @@ func (w *readDirChangesW) deleteWatch(watch *watch) {
 }
 
 // Must run within the I/O thread.
-func (w *readDirChangesW) startRead(watch *watch) error {
-	err := windows.CancelIo(watch.ino.handle)
-	if err != nil {
-		w.sendError(os.NewSyscallError("CancelIo", err))
-		w.deleteWatch(watch)
+func (w *readDirChangesW) removeWatchEntry(watch *watch) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	index := w.watches[watch.ino.volume]
+	if index == nil || index[watch.ino.index] != watch {
+		return
 	}
+	delete(index, watch.ino.index)
+	if len(index) == 0 {
+		delete(w.watches, watch.ino.volume)
+	}
+}
+
+// Must run within the I/O thread and only after the active operation completed.
+func (w *readDirChangesW) closeWatch(watch *watch) error {
+	if watch.active != nil {
+		return errors.New("fsnotify: closing Windows watch with pending I/O")
+	}
+
+	handle := watch.ino.handle
+	if handle == windows.InvalidHandle {
+		w.removeWatchEntry(watch)
+		return nil
+	}
+
+	// Invalidate before CloseHandle so no later path can close a numerically
+	// reused handle.
+	watch.ino.handle = windows.InvalidHandle
+	w.removeWatchEntry(watch)
+	if err := windows.CloseHandle(handle); err != nil {
+		return os.NewSyscallError("CloseHandle", err)
+	}
+	return nil
+}
+
+// Must run within the I/O thread. If a read is active, cancellation is
+// asynchronous; the replacement read is issued only after its completion is
+// dequeued.
+func (w *readDirChangesW) startRead(watch *watch) error {
+	if watch.active != nil {
+		if watch.ino.handle == windows.InvalidHandle {
+			return errors.New("fsnotify: Windows watch has pending I/O on an invalid handle")
+		}
+		err := windows.CancelIoEx(watch.ino.handle, &watch.active.ov)
+		if err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
+			return os.NewSyscallError("CancelIoEx", err)
+		}
+		return nil
+	}
+
+	// Close can be requested while the I/O thread is processing a completion.
+	// Hold mu through ReadDirectoryChanges so marking the backend closed and
+	// starting another read have a defined order.
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return w.closeWatch(watch)
+	}
+
 	mask := w.toWindowsFlags(watch.mask)
 	for _, m := range watch.names {
 		mask |= w.toWindowsFlags(m)
 	}
 	if mask == 0 {
-		err := windows.CloseHandle(watch.ino.handle)
-		if err != nil {
-			w.sendError(os.NewSyscallError("CloseHandle", err))
-		}
-		w.mu.Lock()
-		delete(w.watches[watch.ino.volume], watch.ino.index)
 		w.mu.Unlock()
+		return w.closeWatch(watch)
+	}
+	if watch.ino.handle == windows.InvalidHandle {
+		w.mu.Unlock()
+		return errors.New("fsnotify: starting Windows read on an invalid handle")
+	}
+
+	op := &watchOperation{
+		watch: watch,
+		buf:   watch.buf,
+	}
+	if len(op.buf) != watch.bufsize {
+		op.buf = make([]byte, watch.bufsize)
+	}
+	watch.buf = nil
+	watch.active = op
+	w.pending[&op.ov] = op
+
+	err := windows.ReadDirectoryChanges(
+		watch.ino.handle,
+		unsafe.SliceData(op.buf),
+		uint32(len(op.buf)),
+		watch.recurse,
+		mask,
+		nil,
+		&op.ov,
+		0,
+	)
+	w.mu.Unlock()
+	if err == nil {
 		return nil
 	}
 
-	// We need to pass the array, rather than the slice.
-	rdErr := windows.ReadDirectoryChanges(watch.ino.handle,
-		unsafe.SliceData(watch.buf), uint32(len(watch.buf)),
-		watch.recurse, mask, nil, &watch.ov, 0)
-	if rdErr != nil {
-		err := os.NewSyscallError("ReadDirectoryChanges", rdErr)
-		if rdErr == windows.ERROR_ACCESS_DENIED && watch.mask&provisional == 0 {
-			// Watched directory was probably removed
-			w.sendEvent(watch.path, "", watch.mask&sysFSDELETESELF)
-			err = nil
+	delete(w.pending, &op.ov)
+	watch.active = nil
+	watch.buf = op.buf
+
+	readErr := os.NewSyscallError("ReadDirectoryChanges", err)
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		// Watched directory was probably removed.
+		w.mu.Lock()
+		mask := watch.mask
+		w.mu.Unlock()
+		if mask&provisional == 0 {
+			w.sendEvent(watch.path, "", mask&sysFSDELETESELF)
+			readErr = nil
 		}
-		w.deleteWatch(watch)
-		w.startRead(watch)
-		return err
+	}
+	w.deleteWatch(watch)
+	if closeErr := w.closeWatch(watch); readErr == nil {
+		readErr = closeErr
+	}
+	return readErr
+}
+
+// Must run within the I/O thread. Cancellation is asynchronous: the file
+// handle stays valid until the operation's completion has been dequeued.
+func (w *readDirChangesW) stopRead(watch *watch) error {
+	if watch.active == nil {
+		return w.closeWatch(watch)
+	}
+
+	if watch.ino.handle == windows.InvalidHandle {
+		return errors.New("fsnotify: stopping Windows read on an invalid handle")
+	}
+	err := windows.CancelIoEx(watch.ino.handle, &watch.active.ov)
+	if err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
+		return os.NewSyscallError("CancelIoEx", err)
 	}
 	return nil
 }
 
 // readEvents reads from the I/O completion port, converts the
 // received events into Event objects and sends them via the Events channel.
-// Entry point to the I/O thread.
+// GetQueuedCompletionStatus and CancelIoEx are not thread-affine, so this
+// goroutine must remain free to migrate instead of pinning one OS thread per
+// Watcher.
 func (w *readDirChangesW) readEvents() {
 	var (
-		n   uint32
-		key uintptr
-		ov  *windows.Overlapped
+		n        uint32
+		key      uintptr
+		ov       *windows.Overlapped
+		closeCh  chan<- error
+		closeErr error
 	)
-	runtime.LockOSThread()
+	recordCloseError := func(err error) {
+		if err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	finishClose := func() bool {
+		if closeCh == nil || len(w.pending) != 0 {
+			return false
+		}
+
+		w.mu.Lock()
+		var remaining []*watch
+		for _, index := range w.watches {
+			for _, watch := range index {
+				remaining = append(remaining, watch)
+			}
+		}
+		w.mu.Unlock()
+		for _, watch := range remaining {
+			if watch.active != nil {
+				return false
+			}
+			recordCloseError(w.closeWatch(watch))
+		}
+
+		w.mu.Lock()
+		handle := w.port
+		w.port = windows.InvalidHandle
+		err := windows.CloseHandle(handle)
+		w.mu.Unlock()
+		if err != nil {
+			recordCloseError(os.NewSyscallError("CloseHandle", err))
+		}
+		close(w.Events)
+		close(w.Errors)
+		closeCh <- closeErr
+		return true
+	}
+	beginClose := func(ch chan<- error) {
+		closeCh = ch
+
+		w.mu.Lock()
+		var watches []*watch
+		for _, index := range w.watches {
+			for _, watch := range index {
+				watches = append(watches, watch)
+			}
+		}
+		w.mu.Unlock()
+		for _, watch := range watches {
+			w.clearWatch(watch, false)
+			recordCloseError(w.stopRead(watch))
+		}
+	}
+	pollClose := func() {
+		if closeCh != nil {
+			return
+		}
+		select {
+		case ch := <-w.closeRequest:
+			beginClose(ch)
+		default:
+		}
+	}
 
 	for {
-		// This error is handled after the watch == nil check below.
+		n = 0
+		key = 0
+		ov = nil
 		qErr := windows.GetQueuedCompletionStatus(w.port, &n, &key, &ov, windows.INFINITE)
+		pollClose()
 
-		watch := (*watch)(unsafe.Pointer(ov))
-		if watch == nil {
-			select {
-			case ch := <-w.done:
-				w.mu.Lock()
-				var indexes []indexMap
-				for _, index := range w.watches {
-					indexes = append(indexes, index)
-				}
-				w.mu.Unlock()
-				for _, index := range indexes {
-					for _, watch := range index {
-						w.deleteWatch(watch)
-						w.startRead(watch)
+		if ov == nil {
+			if closeCh != nil {
+				select {
+				case in := <-w.input:
+					if in.op == opRemoveWatch {
+						in.reply <- nil
+					} else {
+						in.reply <- ErrClosed
 					}
+				default:
 				}
+				if finishClose() {
+					return
+				}
+				continue
+			}
 
-				err := windows.CloseHandle(w.port)
-				if err != nil {
-					err = os.NewSyscallError("CloseHandle", err)
-				}
-				close(w.Events)
-				close(w.Errors)
-				ch <- err
-				return
+			select {
 			case in := <-w.input:
 				switch in.op {
 				case opAddWatch:
-					in.reply <- w.addWatch(in.path, uint64(in.flags), in.bufsize)
+					if w.isClosed() {
+						in.reply <- ErrClosed
+					} else {
+						in.reply <- w.addWatch(in.path, uint64(in.flags), in.bufsize)
+					}
 				case opRemoveWatch:
-					in.reply <- w.remWatch(in.path)
+					if w.isClosed() {
+						in.reply <- nil
+					} else {
+						in.reply <- w.remWatch(in.path)
+					}
 				}
 			default:
+			}
+			continue
+		}
+
+		op, ok := w.pending[ov]
+		if !ok {
+			err := errors.New("fsnotify: completion for unknown Windows I/O operation")
+			if closeCh != nil {
+				recordCloseError(err)
+				if finishClose() {
+					return
+				}
+			} else {
+				w.sendError(err)
+			}
+			continue
+		}
+		delete(w.pending, ov)
+
+		watch := op.watch
+		if watch.active != op {
+			err := errors.New("fsnotify: completion does not match active Windows I/O operation")
+			if closeCh != nil {
+				recordCloseError(err)
+			} else {
+				w.sendError(err)
+			}
+		} else {
+			watch.active = nil
+			watch.buf = op.buf
+		}
+
+		if closeCh != nil {
+			recordCloseError(w.stopRead(watch))
+			if finishClose() {
+				return
 			}
 			continue
 		}
@@ -547,25 +828,42 @@ func (w *readDirChangesW) readEvents() {
 		case nil:
 			// No error
 		case windows.ERROR_MORE_DATA:
-			if watch == nil {
-				w.sendError(errors.New("ERROR_MORE_DATA has unexpectedly null lpOverlapped buffer"))
-			} else {
-				// The i/o succeeded but the buffer is full.
-				// In theory we should be building up a full packet.
-				// In practice we can get away with just carrying on.
-				n = uint32(unsafe.Sizeof(watch.buf))
+			w.sendError(ErrEventOverflow)
+			if err := w.startRead(watch); err != nil {
+				w.sendError(err)
 			}
+			continue
 		case windows.ERROR_ACCESS_DENIED:
 			// Watched directory was probably removed
-			w.sendEvent(watch.path, "", watch.mask&sysFSDELETESELF)
+			w.mu.Lock()
+			mask := watch.mask
+			w.mu.Unlock()
+			w.sendEvent(watch.path, "", mask&sysFSDELETESELF)
 			w.deleteWatch(watch)
-			w.startRead(watch)
+			if err := w.closeWatch(watch); err != nil {
+				w.sendError(err)
+			}
 			continue
 		case windows.ERROR_OPERATION_ABORTED:
-			// CancelIo was called on this handle
+			// A mask change canceled this operation. The current watch state
+			// decides whether to issue a replacement or close.
+			if err := w.startRead(watch); err != nil {
+				w.sendError(err)
+			}
 			continue
 		default:
 			w.sendError(os.NewSyscallError("GetQueuedCompletionPort", qErr))
+			if err := w.startRead(watch); err != nil {
+				w.sendError(err)
+			}
+			continue
+		}
+
+		if n > uint32(len(op.buf)) {
+			w.sendError(errors.New("fsnotify: Windows completion exceeds its read buffer"))
+			if err := w.startRead(watch); err != nil {
+				w.sendError(err)
+			}
 			continue
 		}
 
@@ -576,8 +874,18 @@ func (w *readDirChangesW) readEvents() {
 				break
 			}
 
+			headerSize := uint32(unsafe.Offsetof(windows.FileNotifyInformation{}.FileName))
+			if offset > n || n-offset < headerSize {
+				w.sendError(errors.New("fsnotify: truncated Windows notification header"))
+				break
+			}
+
 			// Point "raw" to the event in the buffer
-			raw := (*windows.FileNotifyInformation)(unsafe.Pointer(&watch.buf[offset]))
+			raw := (*windows.FileNotifyInformation)(unsafe.Pointer(&op.buf[offset]))
+			if raw.FileNameLength%2 != 0 || raw.FileNameLength > n-offset-headerSize {
+				w.sendError(errors.New("fsnotify: invalid Windows notification filename length"))
+				break
+			}
 
 			// Create a buf that is the size of the path name
 			size := int(raw.FileNameLength / 2)
@@ -618,8 +926,12 @@ func (w *readDirChangesW) readEvents() {
 				w.mu.Unlock()
 			}
 
+			w.mu.Lock()
+			nameMask := watch.names[name]
+			watchMask := watch.mask
+			w.mu.Unlock()
 			if raw.Action != windows.FILE_ACTION_RENAMED_NEW_NAME {
-				w.sendEvent(fullname, "", watch.names[name]&mask)
+				w.sendEvent(fullname, "", nameMask&mask)
 			}
 			if raw.Action == windows.FILE_ACTION_REMOVED {
 				w.mu.Lock()
@@ -630,27 +942,28 @@ func (w *readDirChangesW) readEvents() {
 			}
 
 			if watch.rename != "" && raw.Action == windows.FILE_ACTION_RENAMED_NEW_NAME {
-				w.sendEvent(fullname, filepath.Join(watch.path, watch.rename), watch.mask&w.toFSnotifyFlags(raw.Action))
+				w.sendEvent(fullname, filepath.Join(watch.path, watch.rename), watchMask&w.toFSnotifyFlags(raw.Action))
 			} else {
-				w.sendEvent(fullname, "", watch.mask&w.toFSnotifyFlags(raw.Action))
+				w.sendEvent(fullname, "", watchMask&w.toFSnotifyFlags(raw.Action))
 			}
 
 			if raw.Action == windows.FILE_ACTION_RENAMED_NEW_NAME {
-				w.sendEvent(filepath.Join(watch.path, watch.rename), "", watch.names[name]&mask)
+				w.mu.Lock()
+				nameMask = watch.names[name]
+				w.mu.Unlock()
+				w.sendEvent(filepath.Join(watch.path, watch.rename), "", nameMask&mask)
 			}
 
 			// Move to the next event in the buffer
 			if raw.NextEntryOffset == 0 {
 				break
 			}
-			offset += raw.NextEntryOffset
-
-			// Error!
-			if offset >= n {
+			if raw.NextEntryOffset < headerSize || raw.NextEntryOffset > n-offset {
 				//lint:ignore ST1005 Windows should be capitalized
 				w.sendError(errors.New("Windows system assumed buffer larger than it is, events have likely been missed"))
 				break
 			}
+			offset += raw.NextEntryOffset
 		}
 
 		if err := w.startRead(watch); err != nil {
