@@ -191,4 +191,5 @@ jobs:
             su action -c '/opt/ooce/go-1.26/bin/go test -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c '/opt/ooce/go-1.26/bin/go test -timeout=10m ./...'
             su action -c '/opt/ooce/go-1.26/bin/go test -v -count=20 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse/remove-watched-dir$" .'
+            su action -c '/opt/ooce/go-1.26/bin/go test -v -count=100 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse/mkdir-p-nested$" .'
             su action -c '/opt/ooce/go-1.26/bin/go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'

@@ -153,6 +153,13 @@ func (w *fen) opForOwners(owners []string) Op {
 	return op
 }
 
+func (w *fen) tracksDirectory(path string, stat os.FileInfo) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	previous := w.info[path]
+	return previous != nil && os.SameFile(previous, stat)
+}
+
 func (w *fen) releaseOwner(owner string) []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -609,6 +616,14 @@ func (w *fen) updateDirectory(path string) error {
 		finfo, err := entry.Info()
 		if err != nil {
 			return err
+		}
+
+		// FEN associations are one-shot. Once an event has fired,
+		// PathIsWatched reports false before the queued event has been handled
+		// and the association has been restored. The recursive parent scan
+		// must not report that same directory as newly created again.
+		if finfo.IsDir() && w.tracksDirectory(entryPath, finfo) {
+			continue
 		}
 
 		if finfo.IsDir() && len(recursiveOwners) > 0 {
