@@ -448,6 +448,21 @@ func TestAdd(t *testing.T) {
 		}
 	})
 
+	t.Run("recursive root is a directory", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		file := join(tmp, "file")
+		touch(t, file)
+
+		w := newWatcher(t)
+		if err := w.Add(join(file, "...")); err == nil {
+			t.Fatal("recursive Add of a file succeeded")
+		}
+		if got := w.WatchList(); len(got) != 0 {
+			t.Fatalf("WatchList after failed recursive Add: %q", got)
+		}
+	})
+
 	t.Run("permission denied", func(t *testing.T) {
 		t.Parallel()
 		if runtime.GOOS == "windows" {

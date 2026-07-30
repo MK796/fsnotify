@@ -25,6 +25,7 @@ type fen struct {
 	Events chan Event
 	Errors chan error
 
+	opsMu   sync.Mutex // Serializes public Add and Remove transactions.
 	mu      sync.Mutex
 	port    *unix.EventPort
 	dirs    map[string]Op                  // Associated directories.
@@ -76,11 +77,12 @@ func (w *fen) Close() error {
 
 func (w *fen) Add(name string) error { return w.AddWith(name) }
 
-func (w *fen) hasUserWatch(path string) bool {
+func (w *fen) userWatch(path string) (Op, bool, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, ok := w.byUser[path]
-	return ok
+	op, ok := w.byUser[path]
+	_, recursive := w.recurse[path]
+	return op, recursive, ok
 }
 
 func (w *fen) addUserWatch(path string, recursive bool, op Op) {
@@ -96,12 +98,13 @@ func (w *fen) addUserWatch(path string, recursive bool, op Op) {
 }
 
 func (w *fen) associateOwned(path string, stat os.FileInfo, follow bool, op Op, owners []string, scanDir bool) error {
-	if err := w.associateFile(path, stat, follow); err != nil {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.associateFileLocked(path, stat, follow); err != nil {
 		return err
 	}
 
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if stat.IsDir() && scanDir {
 		w.dirs[path] = op
 	}
@@ -160,7 +163,7 @@ func (w *fen) tracksDirectory(path string, stat os.FileInfo) bool {
 	return previous != nil && os.SameFile(previous, stat)
 }
 
-func (w *fen) releaseOwner(owner string) []string {
+func (w *fen) releaseOwner(owner string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -178,37 +181,32 @@ func (w *fen) releaseOwner(owner string) []string {
 	sort.Slice(unused, func(i, j int) bool {
 		return len(unused[i]) > len(unused[j])
 	})
-	return unused
-}
 
-func (w *fen) dropAssociation(path string) error {
-	w.mu.Lock()
-	delete(w.dirs, path)
-	delete(w.watches, path)
-	delete(w.owners, path)
-	delete(w.info, path)
-	w.mu.Unlock()
-
-	if !w.port.PathIsWatched(path) {
-		return nil
+	var firstErr error
+	for _, path := range unused {
+		delete(w.dirs, path)
+		delete(w.watches, path)
+		delete(w.owners, path)
+		delete(w.info, path)
+		if err := w.dissociatePathLocked(path); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	if err := w.port.DissociatePath(path); err != nil && !errors.Is(err, unix.ENOENT) {
-		return fmt.Errorf("port.DissociatePath(%q): %w", path, err)
-	}
-	return nil
+	return firstErr
 }
 
 func (w *fen) dropPhysical(path string, tree bool) {
 	w.mu.Lock()
-	var paths []string
 	var removedUser []string
 	for tracked := range w.owners {
 		if tracked == path || (tree && hasPathPrefix(tracked, path)) {
-			paths = append(paths, tracked)
 			delete(w.dirs, tracked)
 			delete(w.watches, tracked)
 			delete(w.owners, tracked)
 			delete(w.info, tracked)
+			if tracked != path {
+				_ = w.dissociatePathLocked(tracked)
+			}
 		}
 	}
 	for userPath := range w.byUser {
@@ -229,13 +227,6 @@ func (w *fen) dropPhysical(path string, tree bool) {
 		if !w.sendEvent(Event{Name: removed, Op: Remove}) {
 			return
 		}
-	}
-
-	for _, tracked := range paths {
-		if tracked == path || !w.port.PathIsWatched(tracked) {
-			continue
-		}
-		_ = w.port.DissociatePath(tracked)
 	}
 }
 
@@ -277,6 +268,9 @@ func (w *fen) takeRename(info os.FileInfo) bool {
 }
 
 func (w *fen) AddWith(name string, opts ...addOpt) error {
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+
 	if w.isClosed() {
 		return ErrClosed
 	}
@@ -291,11 +285,16 @@ func (w *fen) AddWith(name string, opts ...addOpt) error {
 	}
 
 	name, recurse := recursivePath(name)
-	if w.hasUserWatch(name) {
-		return nil
+	existingOp, existingRecursive, exists := w.userWatch(name)
+	if exists {
+		// EventPort associations are one-shot. Refresh an existing logical
+		// watch so Add remains idempotent even while an event is awaiting rearm.
+		with.op = existingOp
+		with.sendCreate = false
+		recurse = existingRecursive
 	}
 	if recurse {
-		return w.addRecursive(name, with)
+		return w.addRecursive(name, with, !exists)
 	}
 
 	stat, err := os.Stat(name)
@@ -308,8 +307,8 @@ func (w *fen) AddWith(name string, opts ...addOpt) error {
 			return w.associateOwned(path, stat, follow, with.op, []string{name}, path == name)
 		})
 		if err != nil {
-			for _, path := range w.releaseOwner(name) {
-				_ = w.dropAssociation(path)
+			if !exists {
+				_ = w.releaseOwner(name)
 			}
 			return err
 		}
@@ -325,7 +324,7 @@ func (w *fen) AddWith(name string, opts ...addOpt) error {
 	return nil
 }
 
-func (w *fen) addRecursive(name string, with withOpts) error {
+func (w *fen) addRecursive(name string, with withOpts, rollbackOnError bool) error {
 	err := filepath.WalkDir(name, func(root string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -343,8 +342,8 @@ func (w *fen) addRecursive(name string, with withOpts) error {
 		return w.associateOwned(root, stat, root == name, with.op, []string{name}, d.IsDir())
 	})
 	if err != nil {
-		for _, path := range w.releaseOwner(name) {
-			_ = w.dropAssociation(path)
+		if rollbackOnError {
+			_ = w.releaseOwner(name)
 		}
 		return err
 	}
@@ -353,6 +352,9 @@ func (w *fen) addRecursive(name string, with withOpts) error {
 }
 
 func (w *fen) Remove(name string) error {
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+
 	if w.isClosed() {
 		return nil
 	}
@@ -376,13 +378,7 @@ func (w *fen) Remove(name string) error {
 			time.Now().Format("15:04:05.000000000"), name)
 	}
 
-	var firstErr error
-	for _, path := range w.releaseOwner(name) {
-		if err := w.dropAssociation(path); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return w.releaseOwner(name)
 }
 
 // readEvents contains the main loop that runs in a goroutine watching for events.
@@ -474,7 +470,13 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 	w.mu.Lock()
 	_, watchedDir := w.dirs[path]
 	_, watchedPath := w.watches[path]
+	_, tracked := w.owners[path]
 	w.mu.Unlock()
+	if !tracked {
+		// EventPort associations are one-shot. A queued event can outlive the
+		// final owner; it must not restore an association removed by Remove.
+		return nil
+	}
 	isWatched := watchedDir || watchedPath
 
 	if events&unix.FILE_DELETE != 0 {
@@ -712,26 +714,18 @@ func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []stri
 }
 
 func (w *fen) associateFile(path string, stat os.FileInfo, follow bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.associateFileLocked(path, stat, follow)
+}
+
+func (w *fen) associateFileLocked(path string, stat os.FileInfo, follow bool) error {
 	if w.isClosed() {
 		return ErrClosed
 	}
-	// This is primarily protecting the call to AssociatePath but it is
-	// important and intentional that the call to PathIsWatched is also
-	// protected by this mutex. Without this mutex, AssociatePath has been seen
-	// to error out that the path is already associated.
-	w.mu.Lock()
-	defer w.mu.Unlock()
 
-	if w.port.PathIsWatched(path) {
-		// Remove the old association in favor of this one If we get ENOENT,
-		// then while the x/sys/unix wrapper still thought that this path was
-		// associated, the underlying event port did not. This call will have
-		// cleared up that discrepancy. The most likely cause is that the event
-		// has fired but we haven't processed it yet.
-		err := w.port.DissociatePath(path)
-		if err != nil && !errors.Is(err, unix.ENOENT) {
-			return fmt.Errorf("port.DissociatePath(%q): %w", path, err)
-		}
+	if err := w.dissociatePathLocked(path); err != nil {
+		return err
 	}
 
 	var events int
@@ -753,15 +747,25 @@ func (w *fen) associateFile(path string, stat os.FileInfo, follow bool) error {
 	return nil
 }
 
-func (w *fen) dissociateFile(path string, stat os.FileInfo, unused bool) error {
+// dissociatePathLocked requires w.mu. EventPort.Get can consume a one-shot
+// association between PathIsWatched and DissociatePath. In that case the
+// association is already gone and the failed dissociation is successful from
+// the watcher's perspective.
+func (w *fen) dissociatePathLocked(path string) error {
 	if !w.port.PathIsWatched(path) {
 		return nil
 	}
 	err := w.port.DissociatePath(path)
-	if err != nil {
-		return fmt.Errorf("port.DissociatePath(%q): %w", path, err)
+	if err == nil || errors.Is(err, unix.ENOENT) || !w.port.PathIsWatched(path) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("port.DissociatePath(%q): %w", path, err)
+}
+
+func (w *fen) dissociateFile(path string, stat os.FileInfo, unused bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dissociatePathLocked(path)
 }
 
 func (w *fen) WatchList() []string {
