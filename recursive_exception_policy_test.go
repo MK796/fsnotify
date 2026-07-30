@@ -3,6 +3,9 @@ package fsnotify
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -174,6 +177,88 @@ func TestNonRecursiveWindowsAncestorRenameBlocked(t *testing.T) {
 		t.Skip("Windows-specific non-recursive evidence")
 	}
 	proveNonRecursiveWindowsAncestorRenameBlocked(t)
+}
+
+func TestRecursiveControlContractHasNoPlatformBranches(t *testing.T) {
+	data, err := os.ReadFile("recursive_contract_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := parser.ParseFile(
+		token.NewFileSet(),
+		"recursive_contract_test.go",
+		data,
+		parser.SkipObjectResolution,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Name.Name != "fsnotify_test" {
+		t.Error("recursive_contract_test.go must use package fsnotify_test and public API only")
+	}
+
+	source := string(data)
+	for _, forbidden := range []string{
+		"runtime.GOOS",
+		"runtime.GOARCH",
+		"t.Skip(",
+		"t.Skipf(",
+		"supportsRecurse",
+		".b.",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("recursive_contract_test.go contains forbidden backend/platform escape %q", forbidden)
+		}
+	}
+}
+
+func TestRecursiveContractReferencesExist(t *testing.T) {
+	contract, err := os.ReadFile("RECURSIVE_WATCH_CONTRACT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractTests := regexp.MustCompile("`(Test[A-Za-z0-9_]+(?:/[a-z0-9_]+)?)`").
+		FindAllStringSubmatch(string(contract), -1)
+
+	defined := make(map[string]struct{})
+	goFiles, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range goFiles {
+		file, err := parser.ParseFile(
+			token.NewFileSet(),
+			path,
+			nil,
+			parser.SkipObjectResolution,
+		)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Recv != nil || !strings.HasPrefix(function.Name.Name, "Test") {
+				continue
+			}
+			defined[function.Name.Name] = struct{}{}
+		}
+	}
+
+	contractSource, err := os.ReadFile("recursive_contract_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subtests := regexp.MustCompile(`t\.Run\("([a-z0-9_]+)"`).
+		FindAllStringSubmatch(string(contractSource), -1)
+	for _, match := range subtests {
+		defined["TestRecursiveContract/"+match[1]] = struct{}{}
+	}
+
+	for _, match := range contractTests {
+		if _, ok := defined[match[1]]; !ok {
+			t.Errorf("contract references missing test %q", match[1])
+		}
+	}
 }
 
 var nonRecursiveGoEvidence = map[string]func(*testing.T){

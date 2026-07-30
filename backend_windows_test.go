@@ -454,3 +454,39 @@ func TestWindowsIOLifecycle(t *testing.T) {
 		assertClosed(t, backend, tracked)
 	})
 }
+
+func TestWindowsRecursiveAddRollback(t *testing.T) {
+	root := t.TempDir()
+	file := join(root, "file")
+	touch(t, file)
+
+	watcher := newWatcher(t, root)
+	defer watcher.Close()
+	before := watcher.WatchList()
+
+	if err := watcher.Add(join(file, "...")); err == nil {
+		t.Fatal("recursive Add(file) succeeded")
+	}
+	if err := watcher.Add(join(root, "missing", "...")); err == nil {
+		t.Fatal("recursive Add(missing) succeeded")
+	}
+	if got := watcher.WatchList(); !slices.Equal(got, before) {
+		t.Fatalf("WatchList after failed recursive Add = %q; want %q", got, before)
+	}
+
+	backend := watcher.b.(*readDirChangesW)
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	watches := 0
+	for _, index := range backend.watches {
+		for _, watch := range index {
+			watches++
+			if watch.recurse {
+				t.Errorf("recursive watch retained after failed Add: %q", watch.path)
+			}
+		}
+	}
+	if watches != 1 {
+		t.Fatalf("physical watches after failed recursive Add = %d; want 1", watches)
+	}
+}
