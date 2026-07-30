@@ -20,13 +20,3 @@ Output:
 
 	create   /root/newsub
 	create   /root/newsub/file2
-
-	linux:
-		create   /root/sub/deep/file1
-
-		remove   /root/sub/deep/file1
-		remove   /root/sub/deep
-		remove   /root/sub
-
-		create   /root/newsub
-		create   /root/newsub/file2
