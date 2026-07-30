@@ -1,7 +1,15 @@
 name: recursive backend integration
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   linux:
@@ -26,6 +34,12 @@ jobs:
         run: >
           go test -race -v -count=50 -shuffle=on -timeout=10m
           -run '^(TestFilterInotifyEvent|TestInotifyEventPath|TestInotifyPrepareReadDoesNotExpirePendingMoves|TestInotifySymlinkAliasOwnership|TestRemove|TestWatchList)$' .
+      - name: Public recursive control contract
+        env:
+          GOTRACEBACK: all
+        run: >
+          go test -race -v -count=10 -shuffle=on -timeout=10m
+          -run '^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$' .
       - name: Recursive ownership and move contracts
         env:
           GOTRACEBACK: all
@@ -79,6 +93,7 @@ jobs:
           FSNOTIFY_BUFFER: ${{ matrix.buffer }}
           GOTRACEBACK: all
         run: |
+          go test -race -v -parallel=1 -count=10 -shuffle=on -timeout=10m -run '^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$' .
           go test -race -parallel=1 -timeout=10m ./...
           go test -race -v -parallel=1 -count=20 -shuffle=on -timeout=10m -run '^TestWindowsIOLifecycle$' .
           go test -race -v -parallel=1 -count=20 -shuffle=on -timeout=10m -run '^TestScript$/watch-recurse' .
@@ -105,6 +120,7 @@ jobs:
         env:
           GOTRACEBACK: all
         run: |
+          go test -race -v -count=10 -shuffle=on -timeout=10m -run '^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$' .
           go test -race -timeout=10m ./...
           FSNOTIFY_BUFFER=4096 go test -race -timeout=10m ./...
           go test -race -v -count=20 -shuffle=on -timeout=10m -run '^TestScript$/watch-recurse' .
@@ -122,6 +138,7 @@ jobs:
             pw useradd action -m
             chown -R action:action .
             su action -c 'go version'
+            su action -c 'go test -race -v -count=10 -shuffle=on -timeout=10m -run "^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$" .'
             su action -c 'go test -race -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c 'go test -race -timeout=10m ./...'
             su action -c 'go test -race -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
@@ -138,6 +155,7 @@ jobs:
           run: |
             useradd -mG wheel action
             su action -c 'go version'
+            su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$" .'
             su action -c 'go test -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c 'go test -timeout=10m ./...'
             su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
@@ -154,6 +172,7 @@ jobs:
           run: |
             useradd -mG wheel action
             su action -c '/usr/pkg/bin/go??? version'
+            su action -c '/usr/pkg/bin/go??? test -v -count=10 -shuffle=on -timeout=10m -run "^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$" .'
             su action -c '/usr/pkg/bin/go??? test -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c '/usr/pkg/bin/go??? test -timeout=10m ./...'
             su action -c '/usr/pkg/bin/go??? test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
@@ -170,6 +189,7 @@ jobs:
           run: |
             pw user add -mG wheel -n action
             su action -c 'go version'
+            su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$" .'
             su action -c 'go test -timeout=10m ./...'
             env FSNOTIFY_BUFFER=4096 su action -c 'go test -timeout=10m ./...'
             su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
@@ -188,8 +208,75 @@ jobs:
             export GOCACHE=/tmp/go-cache
             export GOPATH=/tmp/go-path
             su action -c '/opt/ooce/go-1.26/bin/go version'
+            su action -c '/opt/ooce/go-1.26/bin/go test -v -count=10 -shuffle=on -timeout=10m -run "^(TestRecursiveContract|TestRecursiveContractResourceInvariants)$" .'
             su action -c '/opt/ooce/go-1.26/bin/go test -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c '/opt/ooce/go-1.26/bin/go test -timeout=10m ./...'
             su action -c '/opt/ooce/go-1.26/bin/go test -v -count=20 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse/remove-watched-dir$" .'
             su action -c '/opt/ooce/go-1.26/bin/go test -v -count=100 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse/mkdir-p-nested$" .'
             su action -c '/opt/ooce/go-1.26/bin/go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
+
+  recursive-contract:
+    name: recursive-contract
+    if: ${{ always() }}
+    needs:
+      - linux
+      - windows
+      - macos
+      - freebsd
+      - openbsd
+      - netbsd
+      - dragonflybsd
+      - illumos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the public contract on every backend
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            test "$result" = success
+          done
+
+  resource-invariants:
+    name: resource-invariants
+    if: ${{ always() }}
+    needs:
+      - linux
+      - windows
+      - macos
+      - freebsd
+      - openbsd
+      - netbsd
+      - dragonflybsd
+      - illumos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require backend resource tests on every backend
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            test "$result" = success
+          done
+
+  recursive-backend-integration:
+    name: recursive-backend-integration
+    if: ${{ always() }}
+    needs:
+      - linux
+      - windows
+      - macos
+      - freebsd
+      - openbsd
+      - netbsd
+      - dragonflybsd
+      - illumos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every recursive backend
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            test "$result" = success
+          done
