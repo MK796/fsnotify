@@ -11,9 +11,3 @@ Output:
 	create   /a/b
 	create   /a/b/c
 	create   /a/b/c/file
-
-	linux:
-		create   /a
-		create   /a/b
-		create   /a/b/c
-		create   /a/b/c/file
