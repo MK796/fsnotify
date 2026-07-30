@@ -144,6 +144,9 @@ func TestWindowsIOLifecycle(t *testing.T) {
 		if len(backend.pending) != 0 {
 			t.Errorf("pending map contains %d operations after Close", len(backend.pending))
 		}
+		if len(backend.roots) != 0 {
+			t.Errorf("recursive root monitor map contains %d entries after Close", len(backend.roots))
+		}
 		if backend.port != windows.InvalidHandle {
 			t.Errorf("completion port is still valid after Close: %v", backend.port)
 		}
@@ -453,4 +456,93 @@ func TestWindowsIOLifecycle(t *testing.T) {
 		}
 		assertClosed(t, backend, tracked)
 	})
+}
+
+func TestWindowsRecursiveRootRenameCleanup(t *testing.T) {
+	parent := t.TempDir()
+	a := join(parent, "a")
+	ab := join(parent, "ab")
+	renamed := join(parent, "renamed")
+	mkdir(t, a)
+	mkdir(t, ab)
+
+	w := newWatcher(t)
+	defer w.Close()
+	addWatch(t, w, join(a, "..."))
+	addWatch(t, w, join(ab, "..."))
+
+	if err := os.Rename(a, renamed); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForWatchList := func(want ...string) {
+		t.Helper()
+		slices.Sort(want)
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			got := w.WatchList()
+			slices.Sort(got)
+			if slices.Equal(got, want) {
+				return
+			}
+			select {
+			case _, ok := <-w.Events:
+				if !ok {
+					t.Fatal("Events closed while waiting for recursive root cleanup")
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					t.Fatal("Errors closed while waiting for recursive root cleanup")
+				}
+				t.Fatalf("watcher error: %v", err)
+			case <-ticker.C:
+			case <-timeout.C:
+				t.Fatalf("WatchList after root rename = %q; want %q", got, want)
+			}
+		}
+	}
+	waitForWatchList(ab)
+
+	waitForPathOp := func(path string, op Op) {
+		t.Helper()
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+		for {
+			select {
+			case event, ok := <-w.Events:
+				if !ok {
+					t.Fatal("Events closed while waiting for recursive root cleanup")
+				}
+				if event.Name == path && event.Has(op) {
+					return
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					t.Fatal("Errors closed while waiting for recursive root cleanup")
+				}
+				t.Fatalf("watcher error: %v", err)
+			case <-timeout.C:
+				t.Fatalf("timed out waiting for %s on %q", op, path)
+			}
+		}
+	}
+
+	backend := w.b.(*readDirChangesW)
+	backend.mu.Lock()
+	_, staleRoot := backend.roots[a]
+	_, siblingRoot := backend.roots[ab]
+	backend.mu.Unlock()
+	if staleRoot {
+		t.Errorf("renamed recursive root retained in monitor state: %q", a)
+	}
+	if !siblingRoot {
+		t.Errorf("prefix-similar recursive root lost from monitor state: %q", ab)
+	}
+
+	sentinel := join(ab, "sentinel")
+	touch(t, sentinel, noWait)
+	waitForPathOp(sentinel, Create)
 }
