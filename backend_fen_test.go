@@ -8,6 +8,8 @@ package fsnotify
 
 import (
 	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -62,4 +64,110 @@ func TestRemoveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 0)
+}
+
+func TestFenRecursiveAddRollback(t *testing.T) {
+	tmp := t.TempDir()
+	root := join(tmp, "root")
+	allowed := join(root, "a-allowed")
+	denied := join(root, "z-denied")
+	mkdir(t, root)
+	mkdir(t, allowed)
+	mkdir(t, denied)
+	if err := os.Chmod(denied, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(denied, 0o755)
+	})
+
+	watcher := newWatcher(t, tmp)
+	defer watcher.Close()
+	fen := watcher.b.(*fen)
+
+	fen.mu.Lock()
+	beforeDirs := cloneOpMap(fen.dirs)
+	beforeWatches := cloneOpMap(fen.watches)
+	beforeByUser := cloneOpMap(fen.byUser)
+	beforeRecurse := cloneOpMap(fen.recurse)
+	beforeOwners := cloneOwnerMap(fen.owners)
+	beforeInfo := cloneInfoMap(fen.info)
+	fen.mu.Unlock()
+	paths := []string{tmp, root, allowed, denied}
+	beforeAssociations := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		beforeAssociations[path] = fen.port.PathIsWatched(path)
+	}
+
+	if err := watcher.Add(join(root, "...")); err == nil {
+		t.Fatal("recursive Add succeeded with an unreadable subtree")
+	}
+
+	fen.mu.Lock()
+	if !reflect.DeepEqual(fen.dirs, beforeDirs) {
+		t.Errorf("directories after rollback = %#v; want %#v", fen.dirs, beforeDirs)
+	}
+	if !reflect.DeepEqual(fen.watches, beforeWatches) {
+		t.Errorf("watches after rollback = %#v; want %#v", fen.watches, beforeWatches)
+	}
+	if !reflect.DeepEqual(fen.byUser, beforeByUser) {
+		t.Errorf("user watches after rollback = %#v; want %#v", fen.byUser, beforeByUser)
+	}
+	if !reflect.DeepEqual(fen.recurse, beforeRecurse) {
+		t.Errorf("recursive roots after rollback = %#v; want %#v", fen.recurse, beforeRecurse)
+	}
+	if !reflect.DeepEqual(fen.owners, beforeOwners) {
+		t.Errorf("owners after rollback = %#v; want %#v", fen.owners, beforeOwners)
+	}
+	if !sameInfoMap(fen.info, beforeInfo) {
+		t.Errorf("file identities after rollback differ from their pre-call state")
+	}
+	fen.mu.Unlock()
+
+	for path, want := range beforeAssociations {
+		if got := fen.port.PathIsWatched(path); got != want {
+			t.Errorf("PathIsWatched(%q) after rollback = %t; want %t", path, got, want)
+		}
+	}
+}
+
+func cloneOpMap(source map[string]Op) map[string]Op {
+	clone := make(map[string]Op, len(source))
+	for path, op := range source {
+		clone[path] = op
+	}
+	return clone
+}
+
+func cloneOwnerMap(source map[string]map[string]struct{}) map[string]map[string]struct{} {
+	clone := make(map[string]map[string]struct{}, len(source))
+	for path, owners := range source {
+		ownerClone := make(map[string]struct{}, len(owners))
+		for owner := range owners {
+			ownerClone[owner] = struct{}{}
+		}
+		clone[path] = ownerClone
+	}
+	return clone
+}
+
+func cloneInfoMap(source map[string]os.FileInfo) map[string]os.FileInfo {
+	clone := make(map[string]os.FileInfo, len(source))
+	for path, info := range source {
+		clone[path] = info
+	}
+	return clone
+}
+
+func sameInfoMap(have, want map[string]os.FileInfo) bool {
+	if len(have) != len(want) {
+		return false
+	}
+	for path, wantInfo := range want {
+		haveInfo := have[path]
+		if haveInfo == nil || !os.SameFile(haveInfo, wantInfo) {
+			return false
+		}
+	}
+	return true
 }
