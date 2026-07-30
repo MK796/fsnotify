@@ -831,7 +831,10 @@ func (w *kqueue) addWatchDescriptor(name string, flags uint32, listDir bool) (wa
 		info.isDir = fi.IsDir()
 		info.fileInfo = fi
 	}
-	if info.isDir {
+	// Internal directory watches only track the entry itself for removal and
+	// rename. Subscribe to content-change notifications only when this watch is
+	// responsible for reporting changes inside the directory.
+	if info.isDir && flags&unix.NOTE_WRITE != 0 {
 		flags |= noteDirectoryEvents
 	}
 
