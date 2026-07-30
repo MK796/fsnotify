@@ -7,10 +7,13 @@
 package fsnotify
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -124,6 +127,120 @@ func TestKqueueInternalDirectoryDoesNotRescan(t *testing.T) {
 	}
 	if got := info.dirFlags & (unix.NOTE_WRITE | noteDirectoryEvents); got != 0 {
 		t.Fatalf("internal watch for %q subscribes to directory rescans: flags=%#x", child, got)
+	}
+}
+
+func TestKqueueConcurrentRecursiveLifecycle(t *testing.T) {
+	const (
+		rounds  = 20
+		workers = 8
+	)
+
+	for round := range rounds {
+		root := t.TempDir()
+		w, err := NewWatcher()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Add(join(root, "...")); err != nil {
+			t.Fatal(err)
+		}
+
+		errs := make(chan error, workers*25+32)
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			events, watchErrors := w.Events, w.Errors
+			for events != nil || watchErrors != nil {
+				select {
+				case _, ok := <-events:
+					if !ok {
+						events = nil
+					}
+				case err, ok := <-watchErrors:
+					if !ok {
+						watchErrors = nil
+						continue
+					}
+					if err != nil && !errors.Is(err, ErrClosed) {
+						errs <- fmt.Errorf("round %d Errors channel: %w", round, err)
+					}
+				}
+			}
+		}()
+
+		start := make(chan struct{})
+		ready := make(chan struct{}, workers)
+		proceed := make(chan struct{})
+		var wg sync.WaitGroup
+		for worker := range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if err := w.Add(join(root, "...")); err != nil {
+					errs <- fmt.Errorf("round %d initial Add: %w", round, err)
+					ready <- struct{}{}
+					return
+				}
+				ready <- struct{}{}
+				<-proceed
+
+				for iteration := range 25 {
+					if err := w.Remove(root); err != nil &&
+						!errors.Is(err, ErrClosed) &&
+						!errors.Is(err, ErrNonExistentWatch) {
+						errs <- fmt.Errorf("round %d worker %d Remove %d: %w",
+							round, worker, iteration, err)
+						return
+					}
+					if err := w.Add(join(root, "...")); err != nil &&
+						!errors.Is(err, ErrClosed) {
+						errs <- fmt.Errorf("round %d worker %d Add %d: %w",
+							round, worker, iteration, err)
+						return
+					}
+				}
+			}()
+		}
+
+		close(start)
+		for range workers {
+			<-ready
+		}
+		close(proceed)
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- w.Close() }()
+
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: concurrent Add and Remove did not complete", round)
+		}
+		select {
+		case err := <-closeDone:
+			if err != nil {
+				errs <- fmt.Errorf("round %d Close: %w", round, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: Close did not complete", round)
+		}
+		select {
+		case <-drained:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: event channels did not close", round)
+		}
+
+		close(errs)
+		for err := range errs {
+			t.Error(err)
+		}
 	}
 }
 
