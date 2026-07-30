@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestRemoveState(t *testing.T) {
@@ -105,6 +107,24 @@ func TestRemoveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(0, 0)
+}
+
+func TestKqueueInternalDirectoryDoesNotRescan(t *testing.T) {
+	root := t.TempDir()
+	child := join(root, "child")
+	mkdir(t, child)
+
+	w := newWatcher(t)
+	addWatch(t, w, root)
+
+	kq := w.b.(*kqueue)
+	info, ok := kq.watches.byPath(child)
+	if !ok {
+		t.Fatalf("internal watch for %q is missing", child)
+	}
+	if got := info.dirFlags & (unix.NOTE_WRITE | noteDirectoryEvents); got != 0 {
+		t.Fatalf("internal watch for %q subscribes to directory rescans: flags=%#x", child, got)
+	}
 }
 
 func TestRecursiveMoveOutDropsInternalWatches(t *testing.T) {
