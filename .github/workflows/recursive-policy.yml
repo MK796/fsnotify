@@ -1,0 +1,78 @@
+name: recursive policy
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - name: Enforce recursive-watch policy
+        env:
+          POLICY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: sh .github/scripts/check-recursive-policy.sh
+      - name: Validate exception policy
+        run: >
+          go test -v -count=1
+          -run '^(TestRecursiveExceptionPolicy|TestRecursiveContractReferencesExist|TestRecursiveControlContractHasNoPlatformBranches)$'
+          .
+
+  api-compatibility:
+    name: api-compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - name: Resolve comparison base
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$EVENT_BASE_SHA"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          git cat-file -e "$base^{commit}"
+          echo "API_BASE_SHA=$base" >>"$GITHUB_ENV"
+      - name: Install pinned apidiff
+        run: go install golang.org/x/exp/cmd/apidiff@9ea1abe5
+      - name: Compare exported module API
+        run: |
+          base_dir="$RUNNER_TEMP/fsnotify-api-base"
+          old_export="$RUNNER_TEMP/fsnotify-api-old.export"
+          new_export="$RUNNER_TEMP/fsnotify-api-new.export"
+          report="$RUNNER_TEMP/fsnotify-api-report.txt"
+          git worktree add --detach "$base_dir" "$API_BASE_SHA"
+          (
+            cd "$base_dir"
+            apidiff -m -w "$old_export" github.com/fsnotify/fsnotify
+          )
+          apidiff -m -w "$new_export" github.com/fsnotify/fsnotify
+          apidiff -m "$old_export" "$new_export" >"$report"
+          if [ -s "$report" ]; then
+            cat "$report"
+            exit 1
+          fi
