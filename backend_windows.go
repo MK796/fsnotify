@@ -390,6 +390,9 @@ func (w *readDirChangesW) addWatch(pathname string, flags uint64, bufsize int) e
 	if err != nil {
 		return err
 	}
+	if recurse && dir != pathname {
+		return fmt.Errorf("fsnotify: not a directory: %q", pathname)
+	}
 
 	ino, err := w.getIno(dir)
 	if err != nil {
