@@ -102,6 +102,9 @@ func TestFenRecursiveAddRollback(t *testing.T) {
 	if err := watcher.Add(join(root, "...")); err == nil {
 		t.Fatal("recursive Add succeeded with an unreadable subtree")
 	}
+	if got := watcher.WatchList(); len(got) != 1 || got[0] != tmp {
+		t.Fatalf("WatchList after failed recursive Add: %q; want only %q", got, tmp)
+	}
 
 	fen.mu.Lock()
 	if !reflect.DeepEqual(fen.dirs, beforeDirs) {

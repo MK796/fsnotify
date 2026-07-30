@@ -223,7 +223,8 @@ ownership no longer required by another explicit or recursive root.
 Observable behavior: operations outside the tree are no longer observed; any
 remaining independent owner continues to function.
 
-Tests: `TestRecursiveContract/move_out_releases_obsolete_coverage`.
+Tests:
+`TestRecursiveContract/move_out_releases_and_replacement_registers`.
 
 Backends: inotify, IOCP, kqueue, and FEN.
 
@@ -266,8 +267,12 @@ If recursive registration fails after partially processing a tree, the watcher
 Observable behavior: the failed root is absent from `WatchList`; pre-existing
 watches remain functional; no failed-root coverage or resources remain.
 
-Tests: `TestRecursiveContractRegistrationRollbackCoverage` and the referenced
-backend fault-injection tests.
+Tests: `TestRecursiveContract/reject_invalid_roots_atomically`;
+`TestRecursiveContractResourceInvariants`;
+`TestInotifyRecursiveAddRollback`;
+`TestInotifyRecursiveSubtreeRegistrationRollback`;
+`TestKqueueRecursiveAddRollback`;
+`TestFenRecursiveAddRollback`; and `TestWindowsRecursiveAddRollback`.
 
 Backends: inotify, IOCP, kqueue, and FEN.
 
@@ -401,7 +406,8 @@ such as `/a` **MUST NOT** own, rename, or remove `/ab`.
 Observable behavior: removing or renaming one prefix-like root leaves the
 sibling root covered.
 
-Tests: `TestRecursiveContract/prefix_similar_roots_are_independent`.
+Tests: `TestRecursiveContract/prefix_similar_roots_are_independent`;
+`TestRecursiveContract/prefix_similar_root_rename_is_isolated`.
 
 Backends: inotify, IOCP, kqueue, and FEN.
 
