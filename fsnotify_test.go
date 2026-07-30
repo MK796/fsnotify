@@ -1033,6 +1033,7 @@ func TestWatchList(t *testing.T) {
 
 	t.Run("recursive descendant automatically removed on ancestor rename", func(t *testing.T) {
 		supportsRecurse(t)
+		// recursive-exception: RPE-WIN-ENV-001
 		if runtime.GOOS == "windows" {
 			t.Skip("Windows cannot rename an ancestor containing a separately watched descendant")
 		}
