@@ -1,9 +1,12 @@
 name: 'test'
 on:
   pull_request:
-    paths: ['**.go', 'go.mod', '.github/workflows/*']
   push:
     branches: ['main', 'aix']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   linux:
@@ -174,3 +177,25 @@ jobs:
           FSNOTIFY_BUFFER=4096 su action -c '/opt/ooce/go-1.26/bin/go test -parallel 1    ./...'
                                su action -c '/opt/ooce/go-1.26/bin/go test -parallel 1    ./...'
           FSNOTIFY_DEBUG=1     su action -c '/opt/ooce/go-1.26/bin/go test -parallel 1 -v ./...'
+
+  stock-test-gate:
+    name: stock-test-gate
+    if: ${{ always() }}
+    needs:
+      - linux
+      - windows
+      - macos
+      - freebsd
+      - openbsd
+      - netbsd
+      - dragonflybsd
+      - illumos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every stock test backend
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            test "$result" = success
+          done
