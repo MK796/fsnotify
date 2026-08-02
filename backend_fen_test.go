@@ -219,6 +219,26 @@ func TestFenRecursiveRenameCoverage(t *testing.T) {
 	}
 }
 
+func TestFenCloseWhileGetBlocked(t *testing.T) {
+	for range 100 {
+		watcher, err := NewWatcher()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := watcher.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		for err := range watcher.Errors {
+			if err != nil {
+				t.Fatalf("error after Close: %v", err)
+			}
+		}
+		for range watcher.Events {
+		}
+	}
+}
+
 func waitForFenPathEvent(t *testing.T, watcher *Watcher, path string, fen *fen, statePaths ...string) {
 	t.Helper()
 

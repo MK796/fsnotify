@@ -423,13 +423,15 @@ func (w *fen) readEvents() {
 			return w.port.Get(pevents, 1, nil)
 		})
 		if err != nil && err != unix.ETIME {
+			// EventPort.Get may return either EBADF or an x/sys wrapper error
+			// when Close races with completion processing. Once the watcher is
+			// closed, neither form is a user-visible read error.
+			if w.isClosed() {
+				return
+			}
 			// Interrupted system call (count should be 0) ignore and continue
 			if errors.Is(err, unix.EINTR) && count == 0 {
 				continue
-			}
-			// Get failed because we called w.Close()
-			if errors.Is(err, unix.EBADF) && w.isClosed() {
-				return
 			}
 			// There was an error not caused by calling w.Close()
 			if !w.sendError(fmt.Errorf("port.Get: %w", err)) {
