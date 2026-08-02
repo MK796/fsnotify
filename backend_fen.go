@@ -359,14 +359,17 @@ func (w *fen) addRecursive(name string, with withOpts, rollbackOnError bool) err
 		if root == name && !d.IsDir() {
 			return fmt.Errorf("fsnotify: not a directory: %q", name)
 		}
-		if with.sendCreate && root != name && d.IsDir() {
-			w.sendEvent(Event{Name: root, Op: Create})
-		}
 		stat, err := d.Info()
 		if err != nil {
 			return err
 		}
-		return w.associateOwned(root, stat, root == name, with.op, []string{name}, d.IsDir())
+		if err := w.associateOwned(root, stat, root == name, with.op, []string{name}, d.IsDir()); err != nil {
+			return err
+		}
+		if with.sendCreate && root != name && d.IsDir() {
+			w.sendEvent(Event{Name: root, Op: Create})
+		}
+		return nil
 	})
 	if err != nil {
 		if rollbackOnError {
@@ -489,11 +492,12 @@ func (w *fen) handleDirectory(path string, stat os.FileInfo, follow bool, handle
 // when event was returned)
 func (w *fen) handleEvent(event *unix.PortEvent) error {
 	var (
-		events     = event.Events
-		path       = event.Path
-		fmode      = event.Cookie.(os.FileMode)
-		reRegister = true
-		dropTree   = false
+		events       = event.Events
+		path         = event.Path
+		fmode        = event.Cookie.(os.FileMode)
+		reRegister   = true
+		reAssociated = false
+		dropTree     = false
 	)
 
 	w.mu.Lock()
@@ -591,6 +595,20 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 
 	if events&unix.FILE_MODIFIED != 0 {
 		if fmode.IsDir() && watchedDir {
+			// EventPort associations are one-shot. Rearm before scanning so a
+			// change racing with ReadDir either appears in this scan or queues
+			// the next event; scanning first leaves an unobservable gap.
+			if stat != nil {
+				err := w.associateFile(path, stat, isWatched)
+				if errors.Is(err, fs.ErrNotExist) {
+					w.dropPhysical(path, true)
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				reAssociated = true
+			}
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
@@ -609,13 +627,15 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		}
 	}
 
-	if stat != nil {
+	if stat != nil && !reAssociated {
 		// If we get here, it means we've hit an event above that requires us to
 		// continue watching the file or directory
 		err := w.associateFile(path, stat, isWatched)
 		if errors.Is(err, fs.ErrNotExist) {
-			// Path may have been removed since the stat.
-			err = nil
+			// Path was removed after the stat and cannot be rearmed. Clear the
+			// logical state as well as the already-consumed association.
+			w.dropPhysical(path, stat.IsDir())
+			return nil
 		}
 		return err
 	}
@@ -659,9 +679,6 @@ func (w *fen) updateDirectory(path string) error {
 
 		if finfo.IsDir() && len(recursiveOwners) > 0 {
 			if w.takeRename(finfo) {
-				if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
-					return nil
-				}
 				if err := w.addRenamedSubdir(entryPath, owners, recursiveOwners); err != nil {
 					if errors.Is(err, fs.ErrNotExist) {
 						continue
@@ -670,10 +687,10 @@ func (w *fen) updateDirectory(path string) error {
 						return nil
 					}
 				}
+				if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
+					return nil
+				}
 				continue
-			}
-			if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
-				return nil
 			}
 			if err := w.addRecursiveSubdir(entryPath, owners, recursiveOwners); err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
@@ -725,11 +742,6 @@ func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []stri
 		if !d.IsDir() {
 			return nil
 		}
-		if path != root {
-			if !w.sendEvent(Event{Name: path, Op: Create}) {
-				return nil
-			}
-		}
 		stat, err := d.Info()
 		if err != nil {
 			return err
@@ -738,7 +750,13 @@ func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []stri
 		if path == root {
 			owners = rootOwners
 		}
-		return w.associateOwned(path, stat, false, w.opForOwners(owners), owners, d.IsDir())
+		if err := w.associateOwned(path, stat, false, w.opForOwners(owners), owners, d.IsDir()); err != nil {
+			return err
+		}
+		if !w.sendEvent(Event{Name: path, Op: Create}) {
+			return nil
+		}
+		return nil
 	})
 }
 
