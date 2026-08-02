@@ -225,14 +225,29 @@ func TestFenCloseWhileGetBlocked(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		errorsDone := make(chan []error, 1)
+		go func() {
+			var errors []error
+			for err := range watcher.Errors {
+				if err != nil {
+					errors = append(errors, err)
+				}
+			}
+			errorsDone <- errors
+		}()
+
 		if err := watcher.Close(); err != nil {
 			t.Fatal(err)
 		}
 
-		for err := range watcher.Errors {
-			if err != nil {
-				t.Fatalf("error after Close: %v", err)
+		select {
+		case errors := <-errorsDone:
+			if len(errors) > 0 {
+				t.Fatalf("errors after Close: %v", errors)
 			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Errors did not close after Close")
 		}
 		for range watcher.Events {
 		}
