@@ -10,6 +10,3 @@ touch /renamed/sub/file
 
 Output:
 	rename   /dir
-
-	windows:  # TODO
-		create  /dir/sub/file

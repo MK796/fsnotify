@@ -176,6 +176,15 @@ func (w *fen) releaseOwner(owner string) error {
 		delete(owners, owner)
 		if len(owners) == 0 {
 			unused = append(unused, path)
+			continue
+		}
+
+		// A directory may already be associated through a non-recursive
+		// parent watch when a recursive Add temporarily upgrades it to a
+		// directory scan. Restore that distinction when the recursive owner
+		// is released instead of retaining recursive scan state.
+		if !w.directoryNeedsScanLocked(path, owners) {
+			delete(w.dirs, path)
 		}
 	}
 	sort.Slice(unused, func(i, j int) bool {
@@ -193,6 +202,24 @@ func (w *fen) releaseOwner(owner string) error {
 		}
 	}
 	return firstErr
+}
+
+// directoryNeedsScanLocked reports whether path must be scanned for new
+// children. w.mu must be held.
+func (w *fen) directoryNeedsScanLocked(path string, owners map[string]struct{}) bool {
+	info := w.info[path]
+	if info == nil || !info.IsDir() {
+		return false
+	}
+	if _, explicit := w.byUser[path]; explicit {
+		return true
+	}
+	for owner := range owners {
+		if _, recursive := w.recurse[owner]; recursive {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *fen) dropPhysical(path string, tree bool) {

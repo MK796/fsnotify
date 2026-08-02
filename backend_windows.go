@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,10 +31,11 @@ type readDirChangesW struct {
 	closeRequest chan chan<- error // Prioritized shutdown request
 	closeDone    chan struct{}     // Closed after the I/O thread stopped
 
-	mu       sync.Mutex // Protects access to watches, closed
-	watches  watchMap   // Map of watches (key: i-number)
-	closed   bool       // Set to true when Close() is first called
-	closeErr error      // Set before closeDone is closed
+	mu       sync.Mutex                    // Protects access to watches, roots, closed
+	watches  watchMap                      // Map of watches (key: i-number)
+	roots    map[string]recursiveRootWatch // Recursive roots and their hidden parent monitors
+	closed   bool                          // Set to true when Close() is first called
+	closeErr error                         // Set before closeDone is closed
 
 	// Accessed only by the I/O thread. Every asynchronous read owns a distinct
 	// OVERLAPPED and buffer until its completion has been dequeued.
@@ -52,6 +54,7 @@ func newBackend(ev chan Event, errs chan error) (backend, error) {
 		Errors:       errs,
 		port:         port,
 		watches:      make(watchMap),
+		roots:        make(map[string]recursiveRootWatch),
 		pending:      make(map[*windows.Overlapped]*watchOperation),
 		input:        make(chan *input, 1),
 		done:         make(chan struct{}),
@@ -216,7 +219,9 @@ func (w *readDirChangesW) WatchList() []string {
 	for _, entry := range w.watches {
 		for _, watchEntry := range entry {
 			for name := range watchEntry.names {
-				entries = append(entries, filepath.Join(watchEntry.path, name))
+				if watchEntry.names[name]&^recursiveRootMonitor != 0 {
+					entries = append(entries, filepath.Join(watchEntry.path, name))
+				}
 			}
 			// the directory itself is being watched
 			if watchEntry.mask != 0 {
@@ -271,6 +276,7 @@ const (
 
 const (
 	provisional uint64 = 1 << (32 + iota)
+	recursiveRootMonitor
 )
 
 type input struct {
@@ -288,15 +294,22 @@ type inode struct {
 }
 
 type watch struct {
-	ino     *inode            // i-number
-	recurse bool              // Recursive watch?
-	path    string            // Directory path
-	mask    uint64            // Directory itself is being watched with these notify flags
-	names   map[string]uint64 // Map of names being watched and their notify flags
-	rename  string            // Remembers the old name while renaming a file
-	bufsize int               // Size used for each asynchronous read buffer
-	buf     []byte            // Reused only after the owning read completed
-	active  *watchOperation   // Read whose completion has not been dequeued
+	ino        *inode            // i-number
+	recurse    bool              // Recursive watch?
+	path       string            // Directory path
+	mask       uint64            // Directory itself is being watched with these notify flags
+	names      map[string]uint64 // Map of names being watched and their notify flags
+	rename     string            // Remembers the old name while renaming a file
+	rootRename bool              // The pending rename removed a recursive root.
+	bufsize    int               // Size used for each asynchronous read buffer
+	buf        []byte            // Reused only after the owning read completed
+	active     *watchOperation   // Read whose completion has not been dequeued
+}
+
+type recursiveRootWatch struct {
+	root   *watch
+	parent *watch
+	name   string
 }
 
 // ov must remain the first field: GetQueuedCompletionStatus returns the
@@ -401,7 +414,8 @@ func (w *readDirChangesW) addWatch(pathname string, flags uint64, bufsize int) e
 	w.mu.Lock()
 	watchEntry := w.watches.get(ino)
 	w.mu.Unlock()
-	if watchEntry == nil {
+	created := watchEntry == nil
+	if created {
 		_, err := windows.CreateIoCompletionPort(ino.handle, w.port, 0, 0)
 		if err != nil {
 			windows.CloseHandle(ino.handle)
@@ -423,7 +437,16 @@ func (w *readDirChangesW) addWatch(pathname string, flags uint64, bufsize int) e
 		windows.CloseHandle(ino.handle)
 	}
 	w.mu.Lock()
+	oldMask := watchEntry.mask
+	oldRecurse := watchEntry.recurse
+	if created {
+		oldRecurse = false
+	}
+	hadUserMask := oldMask&^provisional != 0
 	if pathname == dir {
+		if recurse && !hadUserMask {
+			watchEntry.recurse = true
+		}
 		watchEntry.mask |= flags
 	} else {
 		watchEntry.names[filepath.Base(pathname)] |= flags
@@ -442,7 +465,124 @@ func (w *readDirChangesW) addWatch(pathname string, flags uint64, bufsize int) e
 		watchEntry.names[filepath.Base(pathname)] &= ^provisional
 	}
 	w.mu.Unlock()
+
+	if recurse && pathname == dir && !hadUserMask {
+		err = w.addRecursiveRootMonitor(pathname, watchEntry, bufsize)
+		if err != nil {
+			w.mu.Lock()
+			watchEntry.mask = oldMask
+			watchEntry.recurse = oldRecurse
+			w.mu.Unlock()
+			if cleanupErr := w.startRead(watchEntry); cleanupErr != nil {
+				return errors.Join(err, cleanupErr)
+			}
+			return err
+		}
+	}
 	return nil
+}
+
+// addRecursiveRootMonitor watches the root's parent so a rename or deletion of
+// the root itself can remove the recursive user watch. ReadDirectoryChangesW
+// with watchSubtree set only reports changes below the opened directory.
+func (w *readDirChangesW) addRecursiveRootMonitor(path string, root *watch, bufsize int) error {
+	path = filepath.Clean(path)
+
+	w.mu.Lock()
+	_, exists := w.roots[path]
+	w.mu.Unlock()
+	if exists {
+		return nil
+	}
+
+	parentPath := filepath.Dir(path)
+	if parentPath == path {
+		return nil
+	}
+
+	ino, err := w.getIno(parentPath)
+	if err != nil {
+		return err
+	}
+
+	w.mu.Lock()
+	parent := w.watches.get(ino)
+	w.mu.Unlock()
+	if parent == nil {
+		_, err = windows.CreateIoCompletionPort(ino.handle, w.port, 0, 0)
+		if err != nil {
+			windows.CloseHandle(ino.handle)
+			return os.NewSyscallError("CreateIoCompletionPort", err)
+		}
+		parent = &watch{
+			ino:     ino,
+			path:    parentPath,
+			names:   make(map[string]uint64),
+			bufsize: bufsize,
+			buf:     make([]byte, bufsize),
+		}
+		w.mu.Lock()
+		w.watches.set(ino, parent)
+		w.mu.Unlock()
+	} else {
+		windows.CloseHandle(ino.handle)
+	}
+
+	name := filepath.Base(path)
+	w.mu.Lock()
+	parent.names[name] |= recursiveRootMonitor
+	w.mu.Unlock()
+	if err := w.startRead(parent); err != nil {
+		return errors.Join(err, w.rollbackRecursiveRootMonitor(parent, name))
+	}
+
+	// The root may have moved between opening its handle and starting the
+	// parent monitor. Verify the path still names the same directory. A later
+	// move is covered by the already active parent monitor.
+	current, err := w.getIno(path)
+	if err != nil {
+		return errors.Join(err, w.rollbackRecursiveRootMonitor(parent, name))
+	}
+	sameRoot := current.volume == root.ino.volume && current.index == root.ino.index
+	closeErr := windows.CloseHandle(current.handle)
+	if closeErr != nil {
+		closeErr = os.NewSyscallError("CloseHandle", closeErr)
+	}
+	if !sameRoot {
+		err = fmt.Errorf("fsnotify: recursive root changed while adding watch: %q", path)
+	}
+	if err != nil || closeErr != nil {
+		return errors.Join(err, closeErr, w.rollbackRecursiveRootMonitor(parent, name))
+	}
+
+	w.mu.Lock()
+	parentLive := parent.ino.handle != windows.InvalidHandle && w.watches.get(parent.ino) == parent
+	if !parentLive {
+		w.mu.Unlock()
+		err = fmt.Errorf("fsnotify: recursive root parent is no longer watchable: %q", parentPath)
+		return errors.Join(err, w.rollbackRecursiveRootMonitor(parent, name))
+	}
+	w.roots[path] = recursiveRootWatch{
+		root:   root,
+		parent: parent,
+		name:   name,
+	}
+	w.mu.Unlock()
+	return nil
+}
+
+// rollbackRecursiveRootMonitor removes a monitor that was not committed to
+// roots and reapplies the parent's remaining interests.
+func (w *readDirChangesW) rollbackRecursiveRootMonitor(parent *watch, name string) error {
+	w.mu.Lock()
+	mask := parent.names[name] &^ recursiveRootMonitor
+	if mask == 0 {
+		delete(parent.names, name)
+	} else {
+		parent.names[name] = mask
+	}
+	w.mu.Unlock()
+	return w.startRead(parent)
 }
 
 // Must run within the I/O thread.
@@ -477,6 +617,8 @@ func (w *readDirChangesW) remWatch(pathname string) error {
 		return fmt.Errorf("can't use \\... with non-recursive watch %q", pathname)
 	}
 
+	w.removeRecursiveRoot(pathname, 0, nil)
+
 	err = windows.CloseHandle(ino.handle)
 	if err != nil {
 		w.sendError(os.NewSyscallError("CloseHandle", err))
@@ -497,6 +639,114 @@ func (w *readDirChangesW) remWatch(pathname string) error {
 	}
 
 	return w.startRead(watch)
+}
+
+// removeRecursiveRoot removes one explicit recursive root and its hidden
+// parent monitor. eventMask is zero for an explicit Remove and contains a
+// self-event mask when the filesystem removed or renamed the root.
+func (w *readDirChangesW) removeRecursiveRoot(path string, eventMask uint64, processing *watch) bool {
+	path = filepath.Clean(path)
+
+	w.mu.Lock()
+	relation, ok := w.roots[path]
+	rootPath := path
+	if !ok {
+		for root, candidate := range w.roots {
+			if strings.EqualFold(root, path) {
+				rootPath = root
+				relation = candidate
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		w.mu.Unlock()
+		return false
+	}
+	delete(w.roots, rootPath)
+
+	parentMask := relation.parent.names[relation.name] &^ recursiveRootMonitor
+	if parentMask == 0 {
+		delete(relation.parent.names, relation.name)
+	} else {
+		relation.parent.names[relation.name] = parentMask
+	}
+
+	rootMask := relation.root.mask
+	if eventMask != 0 {
+		relation.root.mask = 0
+	}
+	relation.root.recurse = false
+	w.mu.Unlock()
+
+	if eventMask != 0 {
+		w.sendEvent(rootPath, "", rootMask&eventMask)
+		if relation.root != processing {
+			if err := w.startRead(relation.root); err != nil {
+				w.sendError(err)
+			}
+		}
+	}
+	if relation.parent != processing && relation.parent != relation.root {
+		if err := w.startRead(relation.parent); err != nil {
+			w.sendError(err)
+		}
+	}
+	return true
+}
+
+// removeRecursiveTree removes recursive roots whose explicit paths disappeared
+// with an ancestor. Path-component matching keeps prefix-like siblings (for
+// example "a" and "ab") independent.
+func (w *readDirChangesW) removeRecursiveTree(path string, eventMask uint64, processing *watch) {
+	path = filepath.Clean(path)
+
+	w.mu.Lock()
+	var roots []string
+	for root := range w.roots {
+		if hasWindowsPathPrefix(root, path) {
+			roots = append(roots, root)
+		}
+	}
+	w.mu.Unlock()
+
+	sort.Slice(roots, func(i, j int) bool {
+		return len(roots[i]) > len(roots[j])
+	})
+	for _, root := range roots {
+		w.removeRecursiveRoot(root, eventMask, processing)
+	}
+}
+
+func hasWindowsPathPrefix(path, root string) bool {
+	if strings.EqualFold(path, root) {
+		return true
+	}
+	if len(root) > 0 && os.IsPathSeparator(root[len(root)-1]) {
+		return len(path) >= len(root) && strings.EqualFold(path[:len(root)], root)
+	}
+	prefix := root + string(os.PathSeparator)
+	return len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix)
+}
+
+// recursiveRootPath returns the user path for a root monitored through parent.
+// The fallback handles Windows' case-insensitive paths when an event preserves
+// different casing than the path passed to Add.
+func (w *readDirChangesW) recursiveRootPath(parent *watch, name string) (string, bool) {
+	path := filepath.Join(parent.path, name)
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if relation, ok := w.roots[path]; ok && relation.parent == parent {
+		return path, true
+	}
+	for root, relation := range w.roots {
+		if relation.parent == parent && strings.EqualFold(relation.name, name) {
+			return root, true
+		}
+	}
+	return "", false
 }
 
 // Must run within the I/O thread.
@@ -636,6 +886,7 @@ func (w *readDirChangesW) startRead(watch *watch) error {
 	readErr := os.NewSyscallError("ReadDirectoryChanges", err)
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		// Watched directory was probably removed.
+		w.removeRecursiveTree(watch.path, sysFSDELETESELF, watch)
 		w.mu.Lock()
 		mask := watch.mask
 		w.mu.Unlock()
@@ -723,6 +974,7 @@ func (w *readDirChangesW) readEvents() {
 		closeCh = ch
 
 		w.mu.Lock()
+		clear(w.roots)
 		var watches []*watch
 		for _, index := range w.watches {
 			for _, watch := range index {
@@ -838,6 +1090,7 @@ func (w *readDirChangesW) readEvents() {
 			continue
 		case windows.ERROR_ACCESS_DENIED:
 			// Watched directory was probably removed
+			w.removeRecursiveTree(watch.path, sysFSDELETESELF, watch)
 			w.mu.Lock()
 			mask := watch.mask
 			w.mu.Unlock()
@@ -900,33 +1153,44 @@ func (w *readDirChangesW) readEvents() {
 				internal.Debug(fullname, raw.Action)
 			}
 
+			recursiveRoot, isRecursiveRoot := w.recursiveRootPath(watch, name)
+
 			var mask uint64
 			switch raw.Action {
 			case windows.FILE_ACTION_REMOVED:
 				mask = sysFSDELETESELF
+				if isRecursiveRoot {
+					w.removeRecursiveTree(recursiveRoot, sysFSDELETESELF, watch)
+				}
 			case windows.FILE_ACTION_MODIFIED:
 				mask = sysFSMODIFY
 			case windows.FILE_ACTION_RENAMED_OLD_NAME:
 				watch.rename = name
+				watch.rootRename = isRecursiveRoot
+				if isRecursiveRoot {
+					w.removeRecursiveTree(recursiveRoot, sysFSMOVESELF, watch)
+				}
 			case windows.FILE_ACTION_RENAMED_NEW_NAME:
 				// Update saved path of all sub-watches and rename the
 				// names entry under the lock so WatchList() can't observe
 				// a torn state.
-				old := filepath.Join(watch.path, watch.rename)
-				w.mu.Lock()
-				for _, watchMap := range w.watches {
-					for _, ww := range watchMap {
-						if hasPathPrefix(ww.path, old) {
-							ww.path = filepath.Join(fullname, strings.TrimPrefix(ww.path, old))
+				if !watch.rootRename {
+					old := filepath.Join(watch.path, watch.rename)
+					w.mu.Lock()
+					for _, watchMap := range w.watches {
+						for _, ww := range watchMap {
+							if hasPathPrefix(ww.path, old) {
+								ww.path = filepath.Join(fullname, strings.TrimPrefix(ww.path, old))
+							}
 						}
 					}
+					if watch.names[watch.rename] != 0 {
+						watch.names[name] |= watch.names[watch.rename]
+						delete(watch.names, watch.rename)
+						mask = sysFSMOVESELF
+					}
+					w.mu.Unlock()
 				}
-				if watch.names[watch.rename] != 0 {
-					watch.names[name] |= watch.names[watch.rename]
-					delete(watch.names, watch.rename)
-					mask = sysFSMOVESELF
-				}
-				w.mu.Unlock()
 			}
 
 			w.mu.Lock()
@@ -955,6 +1219,8 @@ func (w *readDirChangesW) readEvents() {
 				nameMask = watch.names[name]
 				w.mu.Unlock()
 				w.sendEvent(filepath.Join(watch.path, watch.rename), "", nameMask&mask)
+				watch.rename = ""
+				watch.rootRename = false
 			}
 
 			// Move to the next event in the buffer
@@ -982,6 +1248,9 @@ func (w *readDirChangesW) toWindowsFlags(mask uint64) uint32 {
 	}
 	if mask&(sysFSMOVE|sysFSCREATE|sysFSDELETE) != 0 {
 		m |= windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME
+	}
+	if mask&recursiveRootMonitor != 0 {
+		m |= windows.FILE_NOTIFY_CHANGE_DIR_NAME
 	}
 	return m
 }

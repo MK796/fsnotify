@@ -23,6 +23,7 @@ type kqueue struct {
 
 	kq        int        // File descriptor (as returned by the kqueue() syscall).
 	closepipe [2]int     // Pipe used for closing kq.
+	opsMu     sync.Mutex // Serializes public Add, Remove, and Close transactions.
 	watchMu   sync.Mutex // Serializes descriptor registration and removal.
 	watches   *watches
 }
@@ -556,6 +557,9 @@ func newKqueue() (kq int, closepipe [2]int, err error) {
 }
 
 func (w *kqueue) Close() error {
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+
 	if w.shared.close() {
 		return nil
 	}
@@ -571,6 +575,12 @@ func (w *kqueue) Close() error {
 func (w *kqueue) Add(name string) error { return w.AddWith(name) }
 
 func (w *kqueue) AddWith(name string, opts ...addOpt) error {
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+
+	if w.isClosed() {
+		return ErrClosed
+	}
 	if debug {
 		fmt.Fprintf(os.Stderr, "FSNOTIFY_DEBUG: %s  AddWith(%q)\n",
 			time.Now().Format("15:04:05.000000000"), name)
@@ -645,6 +655,9 @@ func (w *kqueue) AddWith(name string, opts ...addOpt) error {
 }
 
 func (w *kqueue) Remove(name string) error {
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+
 	if w.isClosed() {
 		return nil
 	}
