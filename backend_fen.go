@@ -492,12 +492,11 @@ func (w *fen) handleDirectory(path string, stat os.FileInfo, follow bool, handle
 // when event was returned)
 func (w *fen) handleEvent(event *unix.PortEvent) error {
 	var (
-		events       = event.Events
-		path         = event.Path
-		fmode        = event.Cookie.(os.FileMode)
-		reRegister   = true
-		reAssociated = false
-		dropTree     = false
+		events     = event.Events
+		path       = event.Path
+		fmode      = event.Cookie.(os.FileMode)
+		reRegister = true
+		dropTree   = false
 	)
 
 	w.mu.Lock()
@@ -589,26 +588,27 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 			if !w.sendEvent(Event{Name: path, Op: Remove}) {
 				return nil
 			}
-			// Don't return the error
+			w.dropPhysical(path, false)
+			return nil
 		}
+	}
+
+	// EventPort associations are one-shot. Rearm before publishing events or
+	// scanning directories so a racing change either queues the next event or
+	// appears in the scan; handling first leaves an unobservable gap.
+	err = w.associateFile(path, stat, isWatched)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Preserve child associations: pending child events still have to clear
+		// their own physical and logical state.
+		w.dropPhysical(path, false)
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	if events&unix.FILE_MODIFIED != 0 {
 		if fmode.IsDir() && watchedDir {
-			// EventPort associations are one-shot. Rearm before scanning so a
-			// change racing with ReadDir either appears in this scan or queues
-			// the next event; scanning first leaves an unobservable gap.
-			if stat != nil {
-				err := w.associateFile(path, stat, isWatched)
-				if errors.Is(err, fs.ErrNotExist) {
-					w.dropPhysical(path, true)
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				reAssociated = true
-			}
 			if err := w.updateDirectory(path); err != nil {
 				return err
 			}
@@ -627,18 +627,6 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		}
 	}
 
-	if stat != nil && !reAssociated {
-		// If we get here, it means we've hit an event above that requires us to
-		// continue watching the file or directory
-		err := w.associateFile(path, stat, isWatched)
-		if errors.Is(err, fs.ErrNotExist) {
-			// Path was removed after the stat and cannot be rearmed. Clear the
-			// logical state as well as the already-consumed association.
-			w.dropPhysical(path, stat.IsDir())
-			return nil
-		}
-		return err
-	}
 	return nil
 }
 
