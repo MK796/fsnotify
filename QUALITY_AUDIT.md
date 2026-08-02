@@ -10,7 +10,7 @@ Repository: MK796/fsnotify
 Upstream base: 20b1e15
 Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
-Corrected fencing base: a7b03eef28b15bef1c1b88530b117572c3d19378
+Corrected fencing base: b6247e0b3a207183cf506ecb27e8f71fe985f3b2
 Working branch: quality/recursive-watch-v1
 Contract tag: not valid until created on a green main commit
 ```
@@ -199,7 +199,7 @@ Evidence: `.github/scripts/check-recursive-policy.sh`;
 `.github/workflows/recursive-backend-integration.yml`;
 `RECURSIVE_WATCH_FENCING_PLAN.md`.
 
-Decision: Pin the initial Fencing comparison to `a7b03eef`, use the documented
+Decision: Pin the initial Fencing comparison to `b6247e0b`, use the documented
 `Audit:` and `Contract:` trailers, freeze the agent rules, reject new
 unconditional test sleeps, and set full-matrix cancellation to false.
 
@@ -207,6 +207,85 @@ Fix commit: `ci: correct recursive watch governance gates`
 
 Validation runs: candidate `policy`, `api-compatibility`, and
 `recursive-backend-integration` required.
+
+### AUDIT-FEN-001 | BLOCKER | RESOLVED
+
+ID: `AUDIT-FEN-001`
+
+Severity: `BLOCKER`
+
+Status: `RESOLVED`
+
+Contract: `RC-017`, `RC-018`
+
+Backend: FEN
+
+Finding: A failed recursive Add could temporarily upgrade a directory already
+tracked by a non-recursive parent and leave recursive scan state behind while
+retaining the pre-existing EventPort association.
+
+Evidence: `backend_fen.go`; `backend_fen_test.go`; pull request 15.
+
+Decision: Recompute scan ownership when releasing the failed owner and compare
+all internal maps and EventPort associations with their exact pre-call state.
+
+Fix commit: `a28a6d92ec421dfd9a5b09a1206c81253eed702c`
+
+Validation runs: pull-request test run `30564186435`; post-merge test run
+`30752070285`.
+
+### AUDIT-KQUEUE-001 | BLOCKER | RESOLVED
+
+ID: `AUDIT-KQUEUE-001`
+
+Severity: `BLOCKER`
+
+Status: `RESOLVED`
+
+Contract: `RC-018`, `RC-019`, `RC-020`, `RC-025`
+
+Backend: kqueue
+
+Finding: Public Add and Remove operations could race Close while descriptors
+and the kqueue were being torn down, exposing raw `EBADF` and allowing a watch
+to be registered after Close's cleanup snapshot.
+
+Evidence: `backend_kqueue.go`; `backend_kqueue_test.go`; pull request 15.
+
+Decision: Serialize public Add, Remove, and Close lifecycle operations while
+preserving the existing backend event and ownership mechanisms.
+
+Fix commit: `19200f7324cdead2027cd329a39cf94aeddc4179`
+
+Validation runs: pull-request test run `30564186435`; post-merge test run
+`30752070285`.
+
+### AUDIT-WIN-001 | BLOCKER | RESOLVED
+
+ID: `AUDIT-WIN-001`
+
+Severity: `BLOCKER`
+
+Status: `RESOLVED`
+
+Contract: `RC-006`, `RC-007`, `RC-012`, `RC-017`, `RC-018`, `RC-023`,
+`RC-026`
+
+Backend: Windows IOCP
+
+Finding: Renaming a recursive root could leave the old explicit root in
+`WatchList` because `ReadDirectoryChangesW` did not reliably report the root's
+own rename through the recursive root handle.
+
+Evidence: `backend_windows.go`; `backend_windows_test.go`; pull request 15.
+
+Decision: Add a hidden parent monitor for recursive roots, keep it out of
+`WatchList`, and remove stale root state without affecting prefix-similar roots.
+
+Fix commit: `afd00338e6d9c8331633990e326313acc18e7553`
+
+Validation runs: pull-request test run `30564186435`; post-merge test run
+`30752070285`.
 
 ## Platform Exceptions
 
