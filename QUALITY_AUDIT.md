@@ -65,7 +65,9 @@ A Recursive Control Contract difference cannot use an `ACCEPTED_*` status.
 
 ## Findings
 
-No production-audit finding is open. Production-code auditing has not started.
+The systematic production-code audit has not started. Three production
+blockers were discovered by the initial Fencing contract run and must be
+resolved before the contract can be frozen.
 
 ### AUDIT-TEST-001 | MAJOR | RESOLVED
 
@@ -207,6 +209,145 @@ Fix commit: `ci: correct recursive watch governance gates`
 
 Validation runs: candidate `policy`, `api-compatibility`, and
 `recursive-backend-integration` required.
+
+### AUDIT-TEST-005 | MAJOR | RESOLVED
+
+ID: `AUDIT-TEST-005`
+
+Severity: `MAJOR`
+
+Status: `RESOLVED`
+
+Contract: `RC-023`, `RC-024`
+
+Backend: Windows/IOCP
+
+Finding: The initial Fencing run rejected `RPE-WIN-EVENT-010` as unused after
+the corrected Windows root-lifecycle implementation removed the corresponding
+platform-specific recursive output.
+
+Evidence: `.github/policy/recursive-platform-exceptions.json`; pull request
+16; policy run `30753558597`; stock-test run `30753558598`; recursive backend
+integration run `30753558574`.
+
+Decision: Remove the obsolete exception. The common recursive output now
+applies on Windows, so retaining the entry would falsely document a native
+event difference that recursive watching no longer exposes.
+
+Fix commit: pending Fencing correction commit
+
+Validation runs: corrected candidate `policy`, `stock-test-gate`, and
+`recursive-backend-integration` required.
+
+### AUDIT-CI-002 | MAJOR | RESOLVED
+
+ID: `AUDIT-CI-002`
+
+Severity: `MAJOR`
+
+Status: `RESOLVED`
+
+Contract: `RC-023`, `RC-027`
+
+Backend: all matrix-backed groups
+
+Finding: The initial recursive backend workflow used GitHub Actions' default
+matrix fail-fast behavior. A failed job therefore cancelled sibling Linux and
+macOS jobs, preventing one submitted matrix from producing complete evidence.
+
+Evidence: `.github/workflows/recursive-backend-integration.yml`; pull request
+16; recursive backend integration run `30753558574`.
+
+Decision: Set `strategy.fail-fast: false` on every matrix-backed job. Workflow
+concurrency continues to use `cancel-in-progress: false`; neither setting
+retries a failed test.
+
+Fix commit: pending Fencing correction commit
+
+Validation runs: corrected candidate `recursive-backend-integration` required.
+
+### AUDIT-FEN-002 | BLOCKER | OPEN
+
+ID: `AUDIT-FEN-002`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-013`, `RC-023`
+
+Backend: FEN
+
+Finding: After renaming a directory within a recursively watched tree, FEN can
+lose recursive coverage. One of ten identical contract repetitions could not
+observe any event from 500 sentinel writes below the renamed directory.
+
+Evidence: `backend_fen.go`; `recursive_contract_test.go`; pull request 16;
+recursive backend integration run `30753558574`, illumos job `91511737837`.
+
+Decision: Do not weaken, skip, or allowlist the common contract. Isolate the
+FEN production correction in its own pull request, validate it on illumos and
+the complete stock matrix, and only then rebase the Fencing work onto the new
+green production base.
+
+Fix commit:
+
+Validation runs:
+
+### AUDIT-FEN-003 | BLOCKER | OPEN
+
+ID: `AUDIT-FEN-003`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-003`, `RC-023`
+
+Backend: FEN
+
+Finding: A directory that existed when a recursive root was added could fail
+to report a subsequently created sentinel file. One of ten identical contract
+repetitions timed out while checking the pre-existing descendant set.
+
+Evidence: `backend_fen.go`; `recursive_contract_test.go`; pull request 16;
+recursive backend integration run `30753558574`, illumos job `91511737837`.
+
+Decision: Preserve the platform-identical contract. Add a focused FEN
+regression that records the affected path, logical ownership, saved identity,
+and EventPort association state on failure before changing production code.
+
+Fix commit:
+
+Validation runs:
+
+### AUDIT-FEN-004 | BLOCKER | OPEN
+
+ID: `AUDIT-FEN-004`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-019`, `RC-020`, `RC-023`
+
+Backend: FEN
+
+Finding: Concurrent Close can make `EventPort.Get` return `this EventPort is
+already closed` after the underlying port operation succeeds but before the
+x/sys wrapper converts the retrieved event. The read loop exposes that
+close-induced implementation error through `Watcher.Errors`.
+
+Evidence: `backend_fen.go`; `recursive_contract_test.go`; pull request 16;
+recursive backend integration run `30753558574`, illumos job `91511737837`.
+
+Decision: Treat every EventPort retrieval error observed after the watcher is
+closed as normal shutdown, while continuing to report retrieval errors from an
+open watcher. Validate with a focused concurrent Close regression.
+
+Fix commit:
+
+Validation runs:
 
 ### AUDIT-FEN-001 | BLOCKER | RESOLVED
 

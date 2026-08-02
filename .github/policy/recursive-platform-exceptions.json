@@ -121,17 +121,6 @@
       "non_recursive_evidence": ["script:testdata/watch-dir/rename-from-other-watch"],
       "documentation": ["fsnotify.go"],
       "audit": "AUDIT-TEST-001"
-    },
-    {
-      "id": "RPE-WIN-EVENT-010",
-      "category": "NATIVE_EVENT",
-      "guard": "testdata/watch-recurse/rename-watched-dir|output|windows",
-      "platforms": ["windows"],
-      "contracts": ["RC-024"],
-      "reason": "ReadDirectoryChangesW keeps reporting a renamed watched directory using its original watch path, matching existing non-recursive Windows watcher behavior.",
-      "non_recursive_evidence": ["script:testdata/watch-dir/rename-watched-dir"],
-      "documentation": ["fsnotify.go"],
-      "audit": "AUDIT-TEST-001"
     }
   ]
 }
