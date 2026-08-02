@@ -9,9 +9,12 @@ package fsnotify
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRemoveState(t *testing.T) {
@@ -129,6 +132,182 @@ func TestFenRecursiveAddRollback(t *testing.T) {
 			t.Errorf("PathIsWatched(%q) after rollback = %t; want %t", path, got, want)
 		}
 	}
+}
+
+func TestFenRecursiveExistingDescendantCoverage(t *testing.T) {
+	root := t.TempDir()
+	dirs := []string{
+		join(root, "a"),
+		join(root, "a", "deep"),
+		join(root, "b"),
+	}
+	for _, dir := range dirs {
+		mkdirAll(t, dir)
+	}
+
+	watcher := newWatcher(t, join(root, "..."))
+	defer watcher.Close()
+	fen := watcher.b.(*fen)
+
+	for i, dir := range dirs {
+		path := join(dir, fmt.Sprintf("sentinel-%d", i))
+		if err := os.WriteFile(path, []byte("sentinel"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		waitForFenPathEvent(t, watcher, path, fen, append([]string{root}, dirs...)...)
+	}
+}
+
+func TestFenRecursiveRenameCoverage(t *testing.T) {
+	root := t.TempDir()
+	oldPath := join(root, "old")
+	oldDeep := join(oldPath, "deep")
+	newPath := join(root, "new")
+	newDeep := join(newPath, "deep")
+	mkdirAll(t, oldDeep)
+
+	watcher := newWatcher(t, join(root, "..."))
+	defer watcher.Close()
+	fen := watcher.b.(*fen)
+
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	probe := time.NewTicker(10 * time.Millisecond)
+	defer probe.Stop()
+
+	pending := make(map[string]struct{})
+	events := make([]Event, 0, 16)
+	attempts := 0
+	writeProbe := func() {
+		path := join(newDeep, fmt.Sprintf("sentinel-%d", attempts))
+		attempts++
+		if err := os.WriteFile(path, []byte("sentinel"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pending[filepath.Clean(path)] = struct{}{}
+	}
+	writeProbe()
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				t.Fatal("Events closed before recursive rename coverage became observable")
+			}
+			events = append(events, event)
+			if _, ok := pending[filepath.Clean(event.Name)]; ok {
+				return
+			}
+		case err, ok := <-watcher.Errors:
+			if ok && err != nil {
+				t.Fatalf("watcher error: %v", err)
+			}
+		case <-probe.C:
+			writeProbe()
+		case <-deadline.C:
+			t.Fatalf(
+				"recursive rename coverage missing after %d probes; events=%v; state:\n%s",
+				attempts,
+				events,
+				fenState(fen, root, oldPath, oldDeep, newPath, newDeep),
+			)
+		}
+	}
+}
+
+func waitForFenPathEvent(t *testing.T, watcher *Watcher, path string, fen *fen, statePaths ...string) {
+	t.Helper()
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	events := make([]Event, 0, 8)
+	want := filepath.Clean(path)
+
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				t.Fatalf("Events closed while waiting for %q", path)
+			}
+			events = append(events, event)
+			if filepath.Clean(event.Name) == want {
+				return
+			}
+		case err, ok := <-watcher.Errors:
+			if ok && err != nil {
+				t.Fatalf("watcher error while waiting for %q: %v", path, err)
+			}
+		case <-deadline.C:
+			t.Fatalf(
+				"event for %q missing; events=%v; state:\n%s",
+				path,
+				events,
+				fenState(fen, statePaths...),
+			)
+		}
+	}
+}
+
+func fenState(w *fen, paths ...string) string {
+	type pathState struct {
+		path      string
+		directory bool
+		file      bool
+		user      bool
+		recursive bool
+		identity  bool
+		owners    []string
+	}
+
+	w.mu.Lock()
+	states := make([]pathState, 0, len(paths))
+	for _, path := range paths {
+		_, directory := w.dirs[path]
+		_, file := w.watches[path]
+		_, user := w.byUser[path]
+		_, recursive := w.recurse[path]
+		owners := make([]string, 0, len(w.owners[path]))
+		for owner := range w.owners[path] {
+			owners = append(owners, owner)
+		}
+		sort.Strings(owners)
+		states = append(states, pathState{
+			path:      path,
+			directory: directory,
+			file:      file,
+			user:      user,
+			recursive: recursive,
+			identity:  w.info[path] != nil,
+			owners:    owners,
+		})
+	}
+	w.mu.Unlock()
+
+	var out strings.Builder
+	for _, state := range states {
+		fmt.Fprintf(
+			&out,
+			"%q: dir=%t file=%t user=%t recursive=%t identity=%t owners=%q associated=%t\n",
+			state.path,
+			state.directory,
+			state.file,
+			state.user,
+			state.recursive,
+			state.identity,
+			state.owners,
+			w.port.PathIsWatched(state.path),
+		)
+	}
+	if pending, err := w.port.Pending(); err != nil {
+		fmt.Fprintf(&out, "pending: error=%v\n", err)
+	} else {
+		fmt.Fprintf(&out, "pending: %d\n", pending)
+	}
+	return out.String()
 }
 
 func cloneOpMap(source map[string]Op) map[string]Op {
