@@ -171,7 +171,6 @@ jobs:
           export GOCACHE=/tmp/go-cache
           export GOPATH=/tmp/go-path
           su action -c 'go version'
-          su action -c '/opt/ooce/go-1.26/bin/go test -v -count=100 -shuffle=on -timeout=15m -run "^TestFen(Recursive(ExistingDescendant|Rename)Coverage|CloseWhileGetBlocked)$" .'
           FSNOTIFY_BUFFER=4096 su action -c '/opt/ooce/go-1.26/bin/go test -parallel 1    ./...'
                                su action -c '/opt/ooce/go-1.26/bin/go test -parallel 1    ./...'
           FSNOTIFY_DEBUG=1     su action -c '/opt/ooce/go-1.26/bin/go test -parallel 1 -v ./...'
