@@ -70,6 +70,16 @@ EOF
 		-m "Contract: RC-027"
 }
 
+commit_production_without_trailers() {
+	cat >audit_policy_fixture.go <<'EOF'
+package fsnotify
+
+const auditPolicyFixture = true
+EOF
+	git add QUALITY_AUDIT.md audit_policy_fixture.go
+	git commit -q -m "test: exercise squashed production policy"
+}
+
 expect_pass() {
 	base=$1
 	shift
@@ -153,5 +163,40 @@ expect_fail "$base" "unresolved BLOCKER or MAJOR" env AUDIT_REQUIRE_COMPLETE=1
 resolve_finding AUDIT-COMMON-907
 commit_docs "docs: resolve completion finding"
 expect_pass "$base" env AUDIT_REQUIRE_COMPLETE=1
+
+# Pull requests still require trailers on every production commit.
+new_case
+append_finding AUDIT-COMMON-908 MAJOR OPEN
+commit_docs "docs: record trailer finding"
+base=$(git rev-parse HEAD)
+resolve_finding AUDIT-COMMON-908
+commit_production_without_trailers
+expect_fail "$base" "lacks Audit and Contract trailers" \
+	env POLICY_EVENT_NAME=pull_request AUDIT_REQUIRE_COMPLETE=0
+
+# A squashed main commit is authorized by its parent-to-candidate transition.
+new_case
+append_finding AUDIT-COMMON-909 MAJOR OPEN
+commit_docs "docs: record squash finding"
+base=$(git rev-parse HEAD)
+resolve_finding AUDIT-COMMON-909
+commit_production_without_trailers
+expect_pass "$base" env POLICY_EVENT_NAME=push AUDIT_REQUIRE_COMPLETE=0
+
+# A main production commit without an actionable transition is rejected.
+new_case
+base=$(git rev-parse HEAD)
+commit_production_without_trailers
+expect_fail "$base" "does not resolve a finding that was OPEN or IN_PROGRESS in the event base" \
+	env POLICY_EVENT_NAME=push AUDIT_REQUIRE_COMPLETE=0
+
+# A finding created and resolved only in the squashed candidate is not prior
+# authorization for production work.
+new_case
+base=$(git rev-parse HEAD)
+append_finding AUDIT-COMMON-910 MAJOR RESOLVED
+commit_production_without_trailers
+expect_fail "$base" "does not resolve a finding that was OPEN or IN_PROGRESS in the event base" \
+	env POLICY_EVENT_NAME=push AUDIT_REQUIRE_COMPLETE=0
 
 echo "policy self-test: audit ledger transition cases passed"
