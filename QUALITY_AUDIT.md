@@ -666,6 +666,37 @@ Fix commit: `ci: clarify backend matrix names`
 Validation runs: updated pull-request policy, stock, Staticcheck, and recursive
 backend workflows required.
 
+### AUDIT-CI-006 | MINOR | RESOLVED
+
+ID: `AUDIT-CI-006`
+
+Severity: `MINOR`
+
+Status: `RESOLVED`
+
+Contract: `RC-027`
+
+Backend: BSD/kqueue and illumos/FEN workflow presentation
+
+Finding: Explicit display names made individual jobs identifiable, but the
+Actions graph still grouped the four standalone BSD jobs and standalone
+illumos job into one shared tile. Unlike Linux, Windows, and macOS, the two
+backend families therefore had no distinct matrix tiles.
+
+Evidence: `.github/workflows/test.yml`;
+`.github/workflows/recursive-backend-integration.yml`; post-merge runs
+`30818715321` and `30818715188`.
+
+Decision: Represent BSD as one four-entry matrix and illumos as its own
+one-entry matrix in both workflows. Preserve every runner, VM action, setup
+command, test command, timeout, and required aggregator name. Change only the
+job topology and the corresponding aggregator dependencies.
+
+Fix commit: `ci: group backend jobs by platform family`
+
+Validation runs: updated pull-request policy, stock, Staticcheck, and recursive
+backend workflows required.
+
 ## Platform Exceptions
 
 Every platform exception must be represented in

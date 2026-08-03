@@ -74,14 +74,23 @@ jobs:
                                go test -parallel 1 -race    ./...
           FSNOTIFY_DEBUG=1     go test -parallel 1 -race -v ./...
 
-  # FreeBSD
-  freebsd:
+  bsd:
     runs-on: 'ubuntu-latest'
-    name:    'Stock / BSD / FreeBSD'
+    name: 'Stock / BSD'
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - freebsd
+          - openbsd
+          - netbsd
+          - dragonflybsd
     steps:
       - uses: 'actions/checkout@v6'
+      # FreeBSD
       - name: 'Run stock suite on FreeBSD'
+        if: matrix.platform == 'freebsd'
         id:   'freebsd'
         uses: 'vmactions/freebsd-vm@v1'
         with:
@@ -93,21 +102,15 @@ jobs:
             FSNOTIFY_BUFFER=4096 su action -c 'go test -parallel 1 -race    ./...'
                                  su action -c 'go test -parallel 1 -race    ./...'
             FSNOTIFY_DEBUG=1     su action -c 'go test -parallel 1 -race -v ./...'
-
-  # OpenBSD; no -race as the VM doesn't include the comp set.
-  #
-  # TODO: should probably add this, but on my local machine the tests time out
-  #       with -race as the waits aren't long enough (OpenBSD is kind of slow),
-  #       so should probably look into that first. Go 1.19 is supposed to have a
-  #       much faster race detector, so maybe waiting until we have that is
-  #       enough.
-  openbsd:
-    runs-on: 'ubuntu-latest'
-    name:    'Stock / BSD / OpenBSD'
-    timeout-minutes: 10
-    steps:
-      - uses: 'actions/checkout@v6'
+      # OpenBSD; no -race as the VM doesn't include the comp set.
+      #
+      # TODO: should probably add this, but on my local machine the tests time
+      #       out with -race as the waits aren't long enough (OpenBSD is kind
+      #       of slow), so should probably look into that first. Go 1.19 is
+      #       supposed to have a much faster race detector, so maybe waiting
+      #       until we have that is enough.
       - name: 'test (openbsd)'
+        if: matrix.platform == 'openbsd'
         id:   'openbsd'
         uses: 'vmactions/openbsd-vm@v1'
         with:
@@ -118,15 +121,9 @@ jobs:
             FSNOTIFY_BUFFER=4096 su action -c 'go test -parallel 1    ./...'
                                  su action -c 'go test -parallel 1    ./...'
             FSNOTIFY_DEBUG=1     su action -c 'go test -parallel 1 -v ./...'
-
-  # NetBSD
-  netbsd:
-    runs-on: 'ubuntu-latest'
-    name:    'Stock / BSD / NetBSD'
-    timeout-minutes: 10
-    steps:
-      - uses: 'actions/checkout@v6'
+      # NetBSD
       - name: 'test (netbsd)'
+        if: matrix.platform == 'netbsd'
         id:   'netbsd'
         uses: 'vmactions/netbsd-vm@v1'
         with:
@@ -138,15 +135,9 @@ jobs:
             FSNOTIFY_BUFFER=4096 su action -c '/usr/pkg/bin/go??? test -parallel 1    ./...'
                                  su action -c '/usr/pkg/bin/go??? test -parallel 1    ./...'
             FSNOTIFY_DEBUG=1     su action -c '/usr/pkg/bin/go??? test -parallel 1 -v ./...'
-
-  # DragonFlyBSD
-  dragonflybsd:
-    runs-on: 'ubuntu-latest'
-    name:    'Stock / BSD / DragonFlyBSD'
-    timeout-minutes: 10
-    steps:
-      - uses: 'actions/checkout@v6'
+      # DragonFlyBSD
       - name: 'test (dragonflybsd)'
+        if: matrix.platform == 'dragonflybsd'
         id:   'dragonflybsd'
         uses: 'vmactions/dragonflybsd-vm@v1'
         with:
@@ -162,8 +153,12 @@ jobs:
   # illumos
   illumos:
     runs-on: 'ubuntu-latest'
-    name:    'Stock / illumos (OmniOS)'
+    name: 'Stock / illumos'
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ['OmniOS']
     steps:
     - uses: 'actions/checkout@v6'
     - name: 'test (illumos)'
@@ -187,10 +182,7 @@ jobs:
       - linux
       - windows
       - macos
-      - freebsd
-      - openbsd
-      - netbsd
-      - dragonflybsd
+      - bsd
       - illumos
     runs-on: ubuntu-latest
     steps:

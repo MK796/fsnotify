@@ -131,13 +131,22 @@ jobs:
           FSNOTIFY_BUFFER=4096 go test -race -timeout=10m ./...
           go test -race -v -count=20 -shuffle=on -timeout=10m -run '^TestScript$/watch-recurse' .
 
-  freebsd:
-    name: Recursive / BSD / FreeBSD
+  bsd:
+    name: Recursive / BSD
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - freebsd
+          - openbsd
+          - netbsd
+          - dragonflybsd
     steps:
       - uses: actions/checkout@v6
       - name: Test integrated kqueue backend on FreeBSD
+        if: matrix.platform == 'freebsd'
         uses: vmactions/freebsd-vm@v1
         with:
           prepare: pkg update -f && pkg install -y go
@@ -149,14 +158,8 @@ jobs:
             su action -c 'go test -race -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c 'go test -race -timeout=10m ./...'
             su action -c 'go test -race -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
-
-  openbsd:
-    name: Recursive / BSD / OpenBSD
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
       - name: Test integrated kqueue backend on OpenBSD
+        if: matrix.platform == 'openbsd'
         uses: vmactions/openbsd-vm@v1
         with:
           prepare: pkg_add go
@@ -167,14 +170,8 @@ jobs:
             su action -c 'go test -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c 'go test -timeout=10m ./...'
             su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
-
-  netbsd:
-    name: Recursive / BSD / NetBSD
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
       - name: Test integrated kqueue backend on NetBSD
+        if: matrix.platform == 'netbsd'
         uses: vmactions/netbsd-vm@v1
         with:
           prepare: pkg_add go
@@ -185,14 +182,8 @@ jobs:
             su action -c '/usr/pkg/bin/go??? test -timeout=10m ./...'
             FSNOTIFY_BUFFER=4096 su action -c '/usr/pkg/bin/go??? test -timeout=10m ./...'
             su action -c '/usr/pkg/bin/go??? test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
-
-  dragonflybsd:
-    name: Recursive / BSD / DragonFlyBSD
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
       - name: Test integrated kqueue backend on DragonFly BSD
+        if: matrix.platform == 'dragonflybsd'
         uses: vmactions/dragonflybsd-vm@v1
         with:
           prepare: pkg install -y go
@@ -205,9 +196,14 @@ jobs:
             su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
 
   illumos:
-    name: Recursive / illumos (OmniOS)
+    name: Recursive / illumos
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - OmniOS
     steps:
       - uses: actions/checkout@v6
       - name: Test integrated FEN backend on OmniOS
@@ -233,10 +229,7 @@ jobs:
       - linux
       - windows
       - macos
-      - freebsd
-      - openbsd
-      - netbsd
-      - dragonflybsd
+      - bsd
       - illumos
     runs-on: ubuntu-latest
     steps:
@@ -255,10 +248,7 @@ jobs:
       - linux
       - windows
       - macos
-      - freebsd
-      - openbsd
-      - netbsd
-      - dragonflybsd
+      - bsd
       - illumos
     runs-on: ubuntu-latest
     steps:
@@ -277,10 +267,7 @@ jobs:
       - linux
       - windows
       - macos
-      - freebsd
-      - openbsd
-      - netbsd
-      - dragonflybsd
+      - bsd
       - illumos
     runs-on: ubuntu-latest
     steps:
