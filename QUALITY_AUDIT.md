@@ -600,6 +600,40 @@ Fix commit: `afd00338e6d9c8331633990e326313acc18e7553`
 Validation runs: pull-request test run `30564186435`; post-merge test run
 `30752070285`.
 
+### AUDIT-CI-004 | MAJOR | RESOLVED
+
+ID: `AUDIT-CI-004`
+
+Severity: `MAJOR`
+
+Status: `RESOLVED`
+
+Contract: `RC-027`
+
+Backend: all statically analyzed targets
+
+Finding: The required Staticcheck workflow reported success while its cache
+maintenance emitted `Process completed with exit code 1`. The inherited
+workflow attempted to delete a mutable cache through a token without cache
+deletion permission, ignored that failure with `continue-on-error`, then
+attempted to save the same occupied key. It also restored overlapping Go build
+and Staticcheck caches and used Node 20 action versions that GitHub now runs
+through a deprecated compatibility path.
+
+Evidence: `.github/workflows/staticcheck.yml`; post-merge Staticcheck run
+`30810808832`, job `91676823970`.
+
+Decision: Preserve the existing all-target `go vet` and Staticcheck failure
+semantics, but remove mutable cache deletion, duplicate cache layers, and every
+ignored cache failure. Use the cache built into `actions/setup-go`, one
+SHA-qualified immutable Staticcheck cache with restore prefixes, Node 24 action
+majors, and the released Staticcheck version `2026.1` instead of `@latest`.
+
+Fix commit: `ci: make staticcheck gate deterministic`
+
+Validation runs: candidate Staticcheck and policy runs required; complete
+pull-request checks remain required before merge.
+
 ## Platform Exceptions
 
 Every platform exception must be represented in
