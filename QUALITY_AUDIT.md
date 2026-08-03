@@ -305,13 +305,13 @@ Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-003 | BLOCKER | OPEN
+### AUDIT-FEN-003 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-003`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-003`, `RC-023`
 
@@ -336,13 +336,15 @@ the common contract or its deadline.
 
 Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
 `a73009a30890d362b3470900d1d7b9ffe7f6170c`,
-`567baecb440fecf8d886002af9636aba0f826f18`
+`567baecb440fecf8d886002af9636aba0f826f18`,
+`8696f5503312c1cfd0ab92ee065b2b308c9fa1f3`
 
 Validation runs: previous evidence is focused FEN stress `30756792254`;
 complete candidates `30757372940` and `30757583507`; post-merge stock test
 `30795667697`; post-merge staticcheck `30795667675`. Corrective candidate run
 `30805162440`, illumos job `91658718150`, still loses existing-descendant and
-retained-owner observations.
+retained-owner observations. The complete lifecycle correction is statically
+clean and still requires corrective GitHub Actions validation.
 
 ### AUDIT-FEN-004 | BLOCKER | RESOLVED
 
@@ -375,13 +377,13 @@ Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-005 | BLOCKER | OPEN
+### AUDIT-FEN-005 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-005`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-003`, `RC-008`, `RC-009`, `RC-011`, `RC-019`, `RC-020`,
 `RC-023`, `RC-026`, `RC-027`
@@ -410,9 +412,10 @@ blocked by Events backpressure can exit. Close must then close the EventPort
 under that lock and wait for the read loop to close both public channels.
 Queued events that reach the handler after shutdown must not mutate state.
 
-Fix commit: pending
+Fix commit: `8696f5503312c1cfd0ab92ee065b2b308c9fa1f3`
 
-Validation runs: pending corrective GitHub Actions candidate.
+Validation runs: implementation and backend regression are statically clean;
+the complete corrective GitHub Actions candidate is pending.
 
 ### AUDIT-FEN-001 | BLOCKER | RESOLVED
 
