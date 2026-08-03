@@ -12,8 +12,8 @@ Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
 Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
 Merged fencing candidate: a9b0c5b675aa16c048f450a815fed8d51e882579
-Current audit baseline: b448722b1e2287e40ca350fbf307d3714bb4675b
-Working branch: quality/recursive-watch-common-fixes-v1
+Current audit baseline: fd0580d42cc10219622176c639710e52a369d78d
+Working branch: quality/squash-policy-audit-v1
 Contract tag: recursive-watch-contract-v1 at 79d2d54222f090711e72a3062821b5a5e8fb520f
 ```
 
@@ -119,7 +119,10 @@ contract.
 
 Fix commit: `docs: align recursive watch documentation`
 
-Validation runs: candidate documentation and policy checks required.
+Validation runs: pull request 24 policy and API compatibility `30830891032`;
+recursive backend matrix `30830891346`; Staticcheck `30830891584`; stock
+backend matrix `30830887742`. Post-merge stock `30832742391`, recursive
+`30832742383`, and Staticcheck `30832742146` passed.
 
 ### AUDIT-COMMON-002 | MINOR | RESOLVED
 
@@ -148,7 +151,10 @@ the complete contract suite.
 
 Fix commit: `refactor: remove obsolete recursive feature gate`
 
-Validation runs: candidate full CI required.
+Validation runs: pull request 24 policy and API compatibility `30830891032`;
+recursive backend matrix `30830891346`; Staticcheck `30830891584`; stock
+backend matrix `30830887742`. Post-merge stock `30832742391`, recursive
+`30832742383`, and Staticcheck `30832742146` passed.
 
 Before this systematic pass, three production blockers discovered by the
 initial Fencing contract run were resolved through pull request 17 and
@@ -813,6 +819,48 @@ Fix commit: `ci: allow incremental recursive audit findings`
 Validation runs: policy self-tests cover open-ledger, valid transition,
 unresolved, same-candidate, already-resolved, independent-finding, and final
 completion cases; one complete pull-request run is required.
+
+### AUDIT-CI-008 | MAJOR | OPEN
+
+ID: `AUDIT-CI-008`
+
+Severity: `MAJOR`
+
+Status: `OPEN`
+
+Contract: `RC-027`
+
+Backend: audit governance
+
+Finding: The policy applies its per-production-commit `Audit:` and `Contract:`
+trailer requirement to both pull-request candidates and post-merge `main`
+pushes. GitHub squash merging replaces the individually validated source
+commits with one new commit whose default message does not preserve those
+trailers. A valid, fully green production pull request therefore produces a
+false policy failure after merge even though its tree and audit transitions
+are unchanged.
+
+Evidence: pull request 24 policy run `30830891032` passed both source commits;
+squash commit `fd0580d42cc10219622176c639710e52a369d78d`; post-merge policy run
+`30832742346` failed only because that generated squash commit lacks trailers.
+The same post-merge tree passed stock run `30832742391`, recursive run
+`30832742383`, API compatibility in `30832742346`, and Staticcheck run
+`30832742146`.
+
+Decision: Keep per-commit `Audit:` and `Contract:` enforcement unchanged for
+pull-request candidates. For post-merge push validation, derive accountability
+from the event-base and candidate ledgers: every candidate containing a
+production change must contain at least one finding that uniquely transitions
+from `OPEN` or `IN_PROGRESS` to `RESOLVED`. Continue enforcing frozen-file
+separation, dependency, formatting, test-sleep, and all tree-level governance
+checks in both modes. Add isolated policy self-tests for a valid squash,
+production without an actionable transition, and a finding created and
+resolved only in the squash candidate. Branch protection remains responsible
+for ensuring production reaches `main` through a validated pull request.
+
+Fix commit: pending
+
+Validation runs: pending
 
 ## Platform Exceptions
 
