@@ -267,17 +267,15 @@ func NewBufferedWatcher(sz uint) (*Watcher, error) {
 // # Watching directories
 //
 // All files in a directory are monitored, including new files that are created
-// after the watcher is started. Subdirectories are not watched (i.e. it's
-// non-recursive) unless the path ends with "/..." (e.g. Add("/tmp/dir/...")).
+// after the watcher is started. Subdirectories are not watched unless the path
+// is added recursively as described below.
 //
 // # Watching directories recursively
 //
-// Append "/..." to the path to watch a directory tree. For example
-// Add("/tmp/dir/...") watches /tmp/dir and all subdirectories. New
-// subdirectories created after the watch is started are watched automatically.
-//
-// Recursive watches are removed with Remove() using the path without the
-// "/..." suffix: Remove("/tmp/dir").
+// Add a final "..." path component to watch a directory tree. For example,
+// Add(filepath.Join("/tmp/dir", "...")) watches /tmp/dir and all existing
+// subdirectories. New directories and directory trees created or moved below
+// the root are watched automatically.
 //
 // # Watching files
 //
@@ -305,8 +303,10 @@ func (w *Watcher) AddWith(path string, opts ...addOpt) error { return w.b.AddWit
 
 // Remove stops monitoring the path for changes.
 //
-// If the path was added recursively (with "/..."), all sub-watches are removed.
-// The "/..." suffix is not required on Remove.
+// For an active recursive root, Remove(root) and
+// Remove(filepath.Join(root, "...")) are equivalent. Remove releases the
+// recursive ownership and internal watches held exclusively by that root.
+// Explicit descendant watches and overlapping recursive roots remain watched.
 //
 // Removing a path that has not yet been added returns [ErrNonExistentWatch].
 //
@@ -456,15 +456,10 @@ func withCreate() addOpt {
 	return func(opt *withOpts) { opt.sendCreate = true }
 }
 
-var enableRecurse = true
-
 // Check if this path is recursive (ends with "/..." or "\..."), and return the
 // path with the /... stripped.
 func recursivePath(path string) (string, bool) {
 	path = filepath.Clean(path)
-	if !enableRecurse {
-		return path, false
-	}
 	if filepath.Base(path) == "..." {
 		return filepath.Dir(path), true
 	}

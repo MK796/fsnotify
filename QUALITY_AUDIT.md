@@ -12,8 +12,8 @@ Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
 Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
 Merged fencing candidate: a9b0c5b675aa16c048f450a815fed8d51e882579
-Current audit baseline: 30551b40f303cbc579a74b45114acb4bfd0b3529
-Working branch: quality/recursive-watch-common-audit-v1
+Current audit baseline: b448722b1e2287e40ca350fbf307d3714bb4675b
+Working branch: quality/recursive-watch-common-fixes-v1
 Contract tag: recursive-watch-contract-v1 at 79d2d54222f090711e72a3062821b5a5e8fb520f
 ```
 
@@ -84,15 +84,15 @@ and is covered by `TestHasPathPrefix`; no change is justified there. Backend
 ownership and lifecycle implementations are explicitly deferred to their
 dedicated inotify, IOCP, kqueue, and FEN audit passes.
 
-This pass produced exactly the two open findings below.
+This pass produced exactly the two findings below.
 
-### AUDIT-COMMON-001 | MINOR | OPEN
+### AUDIT-COMMON-001 | MINOR | RESOLVED
 
 ID: `AUDIT-COMMON-001`
 
 Severity: `MINOR`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-001`, `RC-003`, `RC-004`, `RC-006`, `RC-008`, `RC-009`,
 `RC-010`, `RC-011`
@@ -117,17 +117,17 @@ coverage, ownership-preserving Remove behavior, equivalent Remove forms, and
 WatchList representation. Do not alter runtime semantics or the frozen
 contract.
 
-Fix commit: pending
+Fix commit: `docs: align recursive watch documentation`
 
-Validation runs: pending
+Validation runs: candidate documentation and policy checks required.
 
-### AUDIT-COMMON-002 | MINOR | OPEN
+### AUDIT-COMMON-002 | MINOR | RESOLVED
 
 ID: `AUDIT-COMMON-002`
 
 Severity: `MINOR`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-001`, `RC-027`
 
@@ -146,9 +146,9 @@ Decision: In a separate production change, remove the variable and dead branch
 while preserving path cleaning, marker recognition, all public behavior, and
 the complete contract suite.
 
-Fix commit: pending
+Fix commit: `refactor: remove obsolete recursive feature gate`
 
-Validation runs: pending
+Validation runs: candidate full CI required.
 
 Before this systematic pass, three production blockers discovered by the
 initial Fencing contract run were resolved through pull request 17 and
