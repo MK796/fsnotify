@@ -2,7 +2,7 @@
 
 set -eu
 
-initial_fencing_base=b6247e0b3a207183cf506ecb27e8f71fe985f3b2
+initial_fencing_base=d323a68b31cf4a5043d76f95680777b5fa5f6696
 base=${POLICY_BASE_SHA:-}
 case "$base" in
 	""|0000000000000000000000000000000000000000)

@@ -37,7 +37,7 @@ cross-platform validation. A release validation must pass that workflow three
 times sequentially on the same commit without retries or source changes.
 
 The historical immutable implementation reference is tagged
-`recursive-watch-validation-v1`. The corrected fencing base is `b6247e0b`,
+`recursive-watch-validation-v1`. The corrected fencing base is `d323a68`,
 which includes the separately validated corrections merged through pull
-requests 12, 13, and 15. The contract is frozen separately only after the
+requests 12, 13, 15, and 17. The contract is frozen separately only after the
 policy and contract checks pass on every backend.

@@ -11,9 +11,9 @@ Bis diese Struktur vollständig grün validiert und mit `recursive-watch-contrac
 - `recursive-watch-validation-v1` bleibt unverändert als historischer
   Validierungsstand auf `fce4bab` erhalten.
 - Die nachträglich separat validierten Windows-, FEN- und kqueue-Korrekturen
-  sind über die Pull Requests 12, 13 und 15 in `main` enthalten.
+  sind über die Pull Requests 12, 13, 15 und 17 in `main` enthalten.
 - Die verbindliche Produktionsbasis für diesen Fencing-PR ist
-  `b6247e0b3a207183cf506ecb27e8f71fe985f3b2`.
+  `d323a68b31cf4a5043d76f95680777b5fa5f6696`.
 - Der Fencing-PR darf gegenüber dieser Basis keine Produktionsdatei verändern.
 - `recursive-watch-contract-v1` wird erst nach grünem PR, manuellem Merge und
   grünem Post-Merge-Lauf auf dem dann aktuellen `main`-SHA angelegt.
@@ -363,7 +363,7 @@ Das Fencing ist abgeschlossen, wenn:
 - Branch Protection aktiv ist
 - Force-Push und direkte Main-Änderungen blockiert sind
 - `recursive-watch-contract-v1` auf einem vollständig grünen SHA existiert
-- Produktionscode gegenüber `b6247e0b` unverändert ist
+- Produktionscode gegenüber `d323a68` unverändert ist
 - keine temporären Branches oder unnötigen Actions-Läufe verbleiben
 
 ## Annahmen

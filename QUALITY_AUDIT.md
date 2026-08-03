@@ -10,7 +10,7 @@ Repository: MK796/fsnotify
 Upstream base: 20b1e15
 Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
-Corrected fencing base: b6247e0b3a207183cf506ecb27e8f71fe985f3b2
+Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
 Working branch: quality/recursive-watch-v1
 Contract tag: not valid until created on a green main commit
 ```
@@ -66,8 +66,9 @@ A Recursive Control Contract difference cannot use an `ACCEPTED_*` status.
 ## Findings
 
 The systematic production-code audit has not started. Three production
-blockers were discovered by the initial Fencing contract run and must be
-resolved before the contract can be frozen.
+blockers discovered by the initial Fencing contract run were resolved through
+pull request 17 and independently validated before the Fencing work was
+rebased onto the corrected production base.
 
 ### AUDIT-TEST-001 | MAJOR | RESOLVED
 
@@ -201,9 +202,12 @@ Evidence: `.github/scripts/check-recursive-policy.sh`;
 `.github/workflows/recursive-backend-integration.yml`;
 `RECURSIVE_WATCH_FENCING_PLAN.md`.
 
-Decision: Pin the initial Fencing comparison to `b6247e0b`, use the documented
-`Audit:` and `Contract:` trailers, freeze the agent rules, reject new
-unconditional test sleeps, and set full-matrix cancellation to false.
+Decision: Pin the initial Fencing comparison to the corrected production base.
+That base was `b6247e0b` when the gate was first created and is `d323a68` after
+the blockers found by pull request 16 were resolved through pull request 17.
+Use the documented `Audit:` and `Contract:` trailers, freeze the agent rules,
+reject new unconditional test sleeps, and set full-matrix cancellation to
+false.
 
 Fix commit: `ci: correct recursive watch governance gates`
 
@@ -234,7 +238,7 @@ Decision: Remove the obsolete exception. The common recursive output now
 applies on Windows, so retaining the entry would falsely document a native
 event difference that recursive watching no longer exposes.
 
-Fix commit: pending Fencing correction commit
+Fix commit: `7a5ab1ae081a4f28af1d5560b8ff53a223064035`
 
 Validation runs: corrected candidate `policy`, `stock-test-gate`, and
 `recursive-backend-integration` required.
@@ -262,17 +266,17 @@ Decision: Set `strategy.fail-fast: false` on every matrix-backed job. Workflow
 concurrency continues to use `cancel-in-progress: false`; neither setting
 retries a failed test.
 
-Fix commit: pending Fencing correction commit
+Fix commit: `7a5ab1ae081a4f28af1d5560b8ff53a223064035`
 
 Validation runs: corrected candidate `recursive-backend-integration` required.
 
-### AUDIT-FEN-002 | BLOCKER | OPEN
+### AUDIT-FEN-002 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-002`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-013`, `RC-023`
 
@@ -285,22 +289,25 @@ observe any event from 500 sentinel writes below the renamed directory.
 Evidence: `backend_fen.go`; `recursive_contract_test.go`; pull request 16;
 recursive backend integration run `30753558574`, illumos job `91511737837`.
 
-Decision: Do not weaken, skip, or allowlist the common contract. Isolate the
-FEN production correction in its own pull request, validate it on illumos and
-the complete stock matrix, and only then rebase the Fencing work onto the new
-green production base.
+Decision: Do not weaken, skip, or allowlist the common contract. Pull request
+17 closes the FEN one-shot observation gap by re-associating non-terminal
+events before dispatch or directory scanning and by associating newly found
+recursive paths before their public Create events.
 
-Fix commit:
+Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
+`a73009a30890d362b3470900d1d7b9ffe7f6170c`
 
-Validation runs:
+Validation runs: focused FEN stress `30756792254`; complete candidates
+`30757372940` and `30757583507`; post-merge stock test `30795667697`;
+post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-003 | BLOCKER | OPEN
+### AUDIT-FEN-003 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-003`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-003`, `RC-023`
 
@@ -313,21 +320,25 @@ repetitions timed out while checking the pre-existing descendant set.
 Evidence: `backend_fen.go`; `recursive_contract_test.go`; pull request 16;
 recursive backend integration run `30753558574`, illumos job `91511737837`.
 
-Decision: Preserve the platform-identical contract. Add a focused FEN
-regression that records the affected path, logical ownership, saved identity,
-and EventPort association state on failure before changing production code.
+Decision: Preserve the platform-identical contract. Pull request 17 added
+focused existing-descendant coverage and corrected EventPort re-association so
+changes racing with a scan are either observed by that scan or queue a later
+event.
 
-Fix commit:
+Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
+`a73009a30890d362b3470900d1d7b9ffe7f6170c`
 
-Validation runs:
+Validation runs: focused FEN stress `30756792254`; complete candidates
+`30757372940` and `30757583507`; post-merge stock test `30795667697`;
+post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-004 | BLOCKER | OPEN
+### AUDIT-FEN-004 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-004`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-019`, `RC-020`, `RC-023`
 
@@ -343,11 +354,14 @@ recursive backend integration run `30753558574`, illumos job `91511737837`.
 
 Decision: Treat every EventPort retrieval error observed after the watcher is
 closed as normal shutdown, while continuing to report retrieval errors from an
-open watcher. Validate with a focused concurrent Close regression.
+open watcher. Pull request 17 added a focused concurrent Close regression with
+an active Errors consumer.
 
-Fix commit:
+Fix commit: `dfa36f1e6fadb8d6a9a80414ebd0afe8d5cdc2aa`
 
-Validation runs:
+Validation runs: focused FEN stress `30756792254`; complete candidates
+`30757372940` and `30757583507`; post-merge stock test `30795667697`;
+post-merge staticcheck `30795667675`.
 
 ### AUDIT-FEN-001 | BLOCKER | RESOLVED
 
