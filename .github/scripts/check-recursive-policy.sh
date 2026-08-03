@@ -5,6 +5,7 @@ set -eu
 initial_fencing_base=d323a68b31cf4a5043d76f95680777b5fa5f6696
 merged_fencing_base=a9b0c5b675aa16c048f450a815fed8d51e882579
 event_base=${POLICY_BASE_SHA:-}
+policy_event_name=${POLICY_EVENT_NAME:-pull_request}
 contract_tag=
 if candidate_contract_tag=$(git rev-parse -q --verify refs/tags/recursive-watch-contract-v1^{commit}) &&
 	git merge-base --is-ancestor "$candidate_contract_tag" HEAD; then
@@ -28,6 +29,14 @@ if ! git merge-base --is-ancestor "$event_base" HEAD; then
 	echo "policy: event base $event_base is not an ancestor of HEAD" >&2
 	exit 1
 fi
+
+case "$policy_event_name" in
+	pull_request|push|workflow_dispatch) ;;
+	*)
+		echo "policy: unsupported event name: $policy_event_name" >&2
+		exit 1
+		;;
+esac
 
 base=$event_base
 if [ -n "$contract_tag" ]; then
@@ -120,6 +129,69 @@ audit_status() {
 	printf '%s\n' "$1" | awk -F ' \\| ' '{ print $3 }'
 }
 
+audit_contract_references() {
+	document=$1
+	reference=$2
+	awk -v prefix="### $reference | " '
+		/^### / {
+			if (active) {
+				exit
+			}
+			if (index($0, prefix) == 1) {
+				active = 1
+			}
+		}
+		active {
+			line = $0
+			while (match(line, /RC-[0-9][0-9][0-9]/)) {
+				print substr(line, RSTART, RLENGTH)
+				line = substr(line, RSTART + RLENGTH)
+			}
+		}
+	' "$document" | sort -u
+}
+
+validate_push_production_candidate() {
+	transitioned=
+	for ref in $(
+		grep -E '^### AUDIT-.* \| (BLOCKER|MAJOR|MINOR) \| (OPEN|IN_PROGRESS)$' "$base_audit" |
+			awk '{ print $2 }'
+	); do
+		base_heading=$(audit_heading "$base_audit" "$ref")
+		base_count=$(printf '%s\n' "$base_heading" | sed '/^$/d' | wc -l)
+		if [ "$base_count" -ne 1 ]; then
+			echo "policy: push production candidate has a non-unique event-base finding $ref" >&2
+			exit 1
+		fi
+
+		candidate_heading=$(audit_heading QUALITY_AUDIT.md "$ref")
+		candidate_count=$(printf '%s\n' "$candidate_heading" | sed '/^$/d' | wc -l)
+		if [ "$candidate_count" -eq 1 ] &&
+			[ "$(audit_status "$candidate_heading")" = RESOLVED ]; then
+			transitioned="$transitioned $ref"
+		fi
+	done
+
+	if [ -z "$transitioned" ]; then
+		echo "policy: push production candidate does not resolve a finding that was OPEN or IN_PROGRESS in the event base" >&2
+		exit 1
+	fi
+
+	for ref in $transitioned; do
+		contract_refs=$(audit_contract_references QUALITY_AUDIT.md "$ref")
+		if [ -z "$contract_refs" ]; then
+			echo "policy: resolved push finding $ref has no Contract reference" >&2
+			exit 1
+		fi
+		for contract_ref in $contract_refs; do
+			if ! contains_reference RECURSIVE_WATCH_CONTRACT.md "### $contract_ref:"; then
+				echo "policy: resolved push finding $ref references unknown contract rule $contract_ref" >&2
+				exit 1
+			fi
+		done
+	done
+}
+
 changed=$(git diff --name-only "$base" HEAD)
 has_production=false
 has_frozen=false
@@ -132,6 +204,13 @@ for path in $changed; do
 	fi
 done
 
+event_has_production=false
+for path in $(git diff --name-only "$event_base" HEAD); do
+	if is_production_file "$path"; then
+		event_has_production=true
+	fi
+done
+
 policy_tmpdir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/fsnotify-policy.XXXXXX")
 trap 'rm -rf "$policy_tmpdir"' EXIT HUP INT TERM
 base_audit=$policy_tmpdir/base-audit.md
@@ -139,20 +218,22 @@ git show "$event_base:QUALITY_AUDIT.md" >"$base_audit"
 
 event_range="$event_base..HEAD"
 referenced_audits=
-for commit in $(git rev-list --reverse "$event_range"); do
-	commit_has_production=false
-	for path in $(git diff-tree --no-commit-id --name-only -r "$commit"); do
-		if is_production_file "$path"; then
-			commit_has_production=true
+if [ "$policy_event_name" = pull_request ]; then
+	for commit in $(git rev-list --reverse "$event_range"); do
+		commit_has_production=false
+		for path in $(git diff-tree --no-commit-id --name-only -r "$commit"); do
+			if is_production_file "$path"; then
+				commit_has_production=true
+			fi
+		done
+		if [ "$commit_has_production" = true ]; then
+			message=$(git show -s --format=%B "$commit")
+			commit_audits=$(printf '%s\n' "$message" |
+				sed -n 's/^Audit:[[:space:]]*\(AUDIT-[A-Z0-9-][A-Z0-9-]*\).*$/\1/p')
+			referenced_audits="$referenced_audits $commit_audits"
 		fi
 	done
-	if [ "$commit_has_production" = true ]; then
-		message=$(git show -s --format=%B "$commit")
-		commit_audits=$(printf '%s\n' "$message" |
-			sed -n 's/^Audit:[[:space:]]*\(AUDIT-[A-Z0-9-][A-Z0-9-]*\).*$/\1/p')
-		referenced_audits="$referenced_audits $commit_audits"
-	fi
-done
+fi
 
 for ref in $(printf '%s\n' $referenced_audits | sort -u); do
 	base_heading=$(audit_heading "$base_audit" "$ref")
@@ -183,12 +264,17 @@ for ref in $(printf '%s\n' $referenced_audits | sort -u); do
 	fi
 done
 
+if [ "$policy_event_name" != pull_request ] &&
+	[ "$event_has_production" = true ]; then
+	validate_push_production_candidate
+fi
+
 if [ "$has_production" = true ] && [ "$has_frozen" = true ]; then
 	echo "policy: production code and frozen contract files changed in the same candidate" >&2
 	exit 1
 fi
 
-for commit in $(git rev-list --reverse "$range"); do
+for commit in $(git rev-list --reverse "$event_range"); do
 	commit_files=$(git diff-tree --no-commit-id --name-only -r "$commit")
 	commit_has_production=false
 	commit_has_frozen=false
@@ -203,27 +289,29 @@ for commit in $(git rev-list --reverse "$range"); do
 
 	message=$(git show -s --format=%B "$commit")
 	if [ "$commit_has_production" = true ]; then
-		audit_refs=$(printf '%s\n' "$message" |
-			sed -n 's/^Audit:[[:space:]]*\(AUDIT-[A-Z0-9-][A-Z0-9-]*\).*$/\1/p')
-		contract_refs=$(printf '%s\n' "$message" |
-			sed -n 's/^Contract:[[:space:]]*\(RC-[0-9][0-9][0-9]\).*$/\1/p')
+		if [ "$policy_event_name" = pull_request ]; then
+			audit_refs=$(printf '%s\n' "$message" |
+				sed -n 's/^Audit:[[:space:]]*\(AUDIT-[A-Z0-9-][A-Z0-9-]*\).*$/\1/p')
+			contract_refs=$(printf '%s\n' "$message" |
+				sed -n 's/^Contract:[[:space:]]*\(RC-[0-9][0-9][0-9]\).*$/\1/p')
 
-		if [ -z "$audit_refs" ] || [ -z "$contract_refs" ]; then
-			echo "policy: production commit $commit lacks Audit and Contract trailers" >&2
-			exit 1
+			if [ -z "$audit_refs" ] || [ -z "$contract_refs" ]; then
+				echo "policy: production commit $commit lacks Audit and Contract trailers" >&2
+				exit 1
+			fi
+			for ref in $audit_refs; do
+				if ! contains_reference QUALITY_AUDIT.md "$ref"; then
+					echo "policy: production commit $commit references unknown audit finding $ref" >&2
+					exit 1
+				fi
+			done
+			for ref in $contract_refs; do
+				if ! contains_reference RECURSIVE_WATCH_CONTRACT.md "### $ref:"; then
+					echo "policy: production commit $commit references unknown contract rule $ref" >&2
+					exit 1
+				fi
+			done
 		fi
-		for ref in $audit_refs; do
-			if ! contains_reference QUALITY_AUDIT.md "$ref"; then
-				echo "policy: production commit $commit references unknown audit finding $ref" >&2
-				exit 1
-			fi
-		done
-		for ref in $contract_refs; do
-			if ! contains_reference RECURSIVE_WATCH_CONTRACT.md "### $ref:"; then
-				echo "policy: production commit $commit references unknown contract rule $ref" >&2
-				exit 1
-			fi
-		done
 	fi
 
 	if [ "$commit_has_production" = true ] && [ "$commit_has_frozen" = true ]; then

@@ -13,7 +13,7 @@ Historical reference tag: recursive-watch-validation-v1
 Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
 Merged fencing candidate: a9b0c5b675aa16c048f450a815fed8d51e882579
 Current audit baseline: fd0580d42cc10219622176c639710e52a369d78d
-Working branch: quality/squash-policy-audit-v1
+Working branch: quality/squash-policy-fix-v1
 Contract tag: recursive-watch-contract-v1 at 79d2d54222f090711e72a3062821b5a5e8fb520f
 ```
 
@@ -820,13 +820,13 @@ Validation runs: policy self-tests cover open-ledger, valid transition,
 unresolved, same-candidate, already-resolved, independent-finding, and final
 completion cases; one complete pull-request run is required.
 
-### AUDIT-CI-008 | MAJOR | OPEN
+### AUDIT-CI-008 | MAJOR | RESOLVED
 
 ID: `AUDIT-CI-008`
 
 Severity: `MAJOR`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-027`
 
@@ -858,9 +858,10 @@ production without an actionable transition, and a finding created and
 resolved only in the squash candidate. Branch protection remains responsible
 for ensuring production reaches `main` through a validated pull request.
 
-Fix commit: pending
+Fix commit: `ci: support squash-merge policy validation`
 
-Validation runs: pending
+Validation runs: isolated pull-request and push policy self-tests plus one
+complete candidate run required.
 
 ## Platform Exceptions
 
