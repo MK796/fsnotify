@@ -71,7 +71,8 @@ blockers discovered by the initial Fencing contract run were resolved through
 pull request 17 and independently validated before the Fencing work was
 rebased onto the corrected production base. The first post-merge Fencing runs
 then exposed one remaining FEN observation gap and one asynchronous kqueue
-shutdown gap; both have narrowly scoped corrective candidates below.
+shutdown gap. The kqueue correction is independently green; the first FEN
+candidate exposed a broader lifecycle-serialization defect recorded below.
 
 ### AUDIT-TEST-001 | MAJOR | RESOLVED
 
@@ -304,13 +305,13 @@ Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-003 | BLOCKER | RESOLVED
+### AUDIT-FEN-003 | BLOCKER | OPEN
 
 ID: `AUDIT-FEN-003`
 
 Severity: `BLOCKER`
 
-Status: `RESOLVED`
+Status: `OPEN`
 
 Contract: `RC-003`, `RC-023`
 
@@ -327,12 +328,11 @@ recursive backend integration run `30802982672`, illumos job `91651702258`,
 while the other nine identical repetitions passed.
 
 Decision: Preserve the platform-identical contract. The pull request 17 rearm
-fix is insufficient: an EventPort association consumed by a non-terminal
-directory event still has a one-shot interval before re-association. A change
-inside that interval can be lost unless the directory is reconciled after the
-association is restored, independent of the native event bit that consumed it.
-Correct the FEN event path without changing the common contract or its
-deadline.
+fix and the unconditional post-rearm reconciliation are necessary but not
+sufficient. Event handling can still observe or mutate partially completed
+Add and Remove transactions because it does not participate in their
+lifecycle lock. Resolve this state race under `AUDIT-FEN-005` without changing
+the common contract or its deadline.
 
 Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
 `a73009a30890d362b3470900d1d7b9ffe7f6170c`,
@@ -340,9 +340,9 @@ Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
 
 Validation runs: previous evidence is focused FEN stress `30756792254`;
 complete candidates `30757372940` and `30757583507`; post-merge stock test
-`30795667697`; post-merge staticcheck `30795667675`. The new deterministic
-FEN regression and complete corrective candidate still require GitHub Actions
-validation.
+`30795667697`; post-merge staticcheck `30795667675`. Corrective candidate run
+`30805162440`, illumos job `91658718150`, still loses existing-descendant and
+retained-owner observations.
 
 ### AUDIT-FEN-004 | BLOCKER | RESOLVED
 
@@ -374,6 +374,45 @@ Fix commit: `dfa36f1e6fadb8d6a9a80414ebd0afe8d5cdc2aa`
 Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
+
+### AUDIT-FEN-005 | BLOCKER | OPEN
+
+ID: `AUDIT-FEN-005`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-003`, `RC-008`, `RC-009`, `RC-011`, `RC-019`, `RC-020`,
+`RC-023`, `RC-026`, `RC-027`
+
+Backend: FEN
+
+Finding: FEN serializes public Add and Remove transactions with `opsMu`, but
+event handling and Close mutate the same EventPort associations and ownership
+state outside that transaction. A queued event can therefore reconcile
+partially changed ownership, and Close can invalidate the EventPort while an
+Add or event rearm is calling `AssociatePath`.
+
+Evidence: `backend_fen.go`; commit
+`e09f88c700c70d5b062ec94760b85fc6ddd2ff44`; recursive backend integration
+run `30805162440`, illumos job `91658718150`. Ten unchanged contract
+repetitions produced missing coverage for existing descendants and retained
+owners, a stale prefix-similar renamed root, and two
+`port.AssociatePath(...): bad file number` errors during concurrent lifecycle
+operations. The surrounding SSH session completed normally and only reported
+the inner `go test` exit status.
+
+Decision: Treat Add, Remove, one complete event-handling transaction, and the
+EventPort portion of Close as one serialized FEN lifecycle. Close must publish
+the shared shutdown signal before waiting for the lifecycle lock so a handler
+blocked by Events backpressure can exit. Close must then close the EventPort
+under that lock and wait for the read loop to close both public channels.
+Queued events that reach the handler after shutdown must not mutate state.
+
+Fix commit: pending
+
+Validation runs: pending corrective GitHub Actions candidate.
 
 ### AUDIT-FEN-001 | BLOCKER | RESOLVED
 
