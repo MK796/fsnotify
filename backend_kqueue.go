@@ -21,8 +21,9 @@ type kqueue struct {
 	Events chan Event
 	Errors chan error
 
-	kq        int        // File descriptor (as returned by the kqueue() syscall).
-	closepipe [2]int     // Pipe used for closing kq.
+	kq        int    // File descriptor (as returned by the kqueue() syscall).
+	closepipe [2]int // Pipe used for closing kq.
+	doneResp  chan struct{}
 	opsMu     sync.Mutex // Serializes public Add, Remove, and Close transactions.
 	watchMu   sync.Mutex // Serializes descriptor registration and removal.
 	watches   *watches
@@ -512,6 +513,7 @@ func newBackend(ev chan Event, errs chan error) (backend, error) {
 		Errors:    errs,
 		kq:        kq,
 		closepipe: closepipe,
+		doneResp:  make(chan struct{}),
 		watches:   newWatches(),
 	}
 
@@ -558,17 +560,16 @@ func newKqueue() (kq int, closepipe [2]int, err error) {
 
 func (w *kqueue) Close() error {
 	w.opsMu.Lock()
-	defer w.opsMu.Unlock()
+	if !w.shared.close() {
+		for _, name := range w.watches.listPaths(false) {
+			w.remove2(name, true)
+		}
 
-	if w.shared.close() {
-		return nil
+		unix.Close(w.closepipe[1]) // Send "quit" message to readEvents
 	}
+	w.opsMu.Unlock()
 
-	for _, name := range w.watches.listPaths(false) {
-		w.remove2(name, true)
-	}
-
-	unix.Close(w.closepipe[1]) // Send "quit" message to readEvents
+	<-w.doneResp
 	return nil
 }
 
@@ -888,6 +889,7 @@ func (w *kqueue) readEvents() {
 		close(w.Errors)
 		_ = unix.Close(w.kq)
 		unix.Close(w.closepipe[0])
+		close(w.doneResp)
 	}()
 
 	eventBuffer := make([]unix.Kevent_t, 10)

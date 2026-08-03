@@ -11,6 +11,7 @@ Upstream base: 20b1e15
 Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
 Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
+Merged fencing candidate: a9b0c5b675aa16c048f450a815fed8d51e882579
 Working branch: quality/recursive-watch-v1
 Contract tag: not valid until created on a green main commit
 ```
@@ -68,7 +69,10 @@ A Recursive Control Contract difference cannot use an `ACCEPTED_*` status.
 The systematic production-code audit has not started. Three production
 blockers discovered by the initial Fencing contract run were resolved through
 pull request 17 and independently validated before the Fencing work was
-rebased onto the corrected production base.
+rebased onto the corrected production base. The first post-merge Fencing runs
+then exposed one remaining FEN observation gap and one asynchronous kqueue
+shutdown gap. The kqueue correction is independently green; the first FEN
+candidate exposed a broader lifecycle-serialization defect recorded below.
 
 ### AUDIT-TEST-001 | MAJOR | RESOLVED
 
@@ -319,18 +323,28 @@ repetitions timed out while checking the pre-existing descendant set.
 
 Evidence: `backend_fen.go`; `recursive_contract_test.go`; pull request 16;
 recursive backend integration run `30753558574`, illumos job `91511737837`.
+The same missing existing-descendant event recurred after the Fencing merge in
+recursive backend integration run `30802982672`, illumos job `91651702258`,
+while the other nine identical repetitions passed.
 
-Decision: Preserve the platform-identical contract. Pull request 17 added
-focused existing-descendant coverage and corrected EventPort re-association so
-changes racing with a scan are either observed by that scan or queue a later
-event.
+Decision: Preserve the platform-identical contract. The pull request 17 rearm
+fix and the unconditional post-rearm reconciliation are necessary but not
+sufficient. Event handling can still observe or mutate partially completed
+Add and Remove transactions because it does not participate in their
+lifecycle lock. Resolve this state race under `AUDIT-FEN-005` without changing
+the common contract or its deadline.
 
 Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
-`a73009a30890d362b3470900d1d7b9ffe7f6170c`
+`a73009a30890d362b3470900d1d7b9ffe7f6170c`,
+`567baecb440fecf8d886002af9636aba0f826f18`,
+`8696f5503312c1cfd0ab92ee065b2b308c9fa1f3`
 
-Validation runs: focused FEN stress `30756792254`; complete candidates
-`30757372940` and `30757583507`; post-merge stock test `30795667697`;
-post-merge staticcheck `30795667675`.
+Validation runs: previous evidence is focused FEN stress `30756792254`;
+complete candidates `30757372940` and `30757583507`; post-merge stock test
+`30795667697`; post-merge staticcheck `30795667675`. Corrective candidate run
+`30805162440`, illumos job `91658718150`, still loses existing-descendant and
+retained-owner observations. The complete lifecycle correction is statically
+clean and still requires corrective GitHub Actions validation.
 
 ### AUDIT-FEN-004 | BLOCKER | RESOLVED
 
@@ -362,6 +376,86 @@ Fix commit: `dfa36f1e6fadb8d6a9a80414ebd0afe8d5cdc2aa`
 Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
+
+### AUDIT-FEN-005 | BLOCKER | RESOLVED
+
+ID: `AUDIT-FEN-005`
+
+Severity: `BLOCKER`
+
+Status: `RESOLVED`
+
+Contract: `RC-003`, `RC-008`, `RC-009`, `RC-011`, `RC-019`, `RC-020`,
+`RC-023`, `RC-026`, `RC-027`
+
+Backend: FEN
+
+Finding: FEN serializes public Add and Remove transactions with `opsMu`, but
+event handling and Close mutate the same EventPort associations and ownership
+state outside that transaction. A queued event can therefore reconcile
+partially changed ownership, and Close can invalidate the EventPort while an
+Add or event rearm is calling `AssociatePath`.
+
+Evidence: `backend_fen.go`; commit
+`e09f88c700c70d5b062ec94760b85fc6ddd2ff44`; recursive backend integration
+run `30805162440`, illumos job `91658718150`. Ten unchanged contract
+repetitions produced missing coverage for existing descendants and retained
+owners, a stale prefix-similar renamed root, and two
+`port.AssociatePath(...): bad file number` errors during concurrent lifecycle
+operations. The surrounding SSH session completed normally and only reported
+the inner `go test` exit status.
+
+Decision: Treat Add, Remove, one complete event-state transaction, and the
+EventPort portion of Close as one serialized FEN lifecycle. Event and error
+delivery is not part of that critical section; it must occur in unchanged
+order after state mutation releases the lifecycle lock. Close must publish the
+shared shutdown signal before waiting for the lock, close the EventPort under
+that lock, and wait for the read loop to close both public channels. Queued
+events that reach the handler after shutdown must not mutate state.
+
+Fix commits: `8696f5503312c1cfd0ab92ee065b2b308c9fa1f3`,
+`d8e7818ecc36f57cee5b9220134c04aa91f8019e`
+
+Validation runs: implementation and backend regression are statically clean;
+corrective run `30806727820`, illumos job `91663711218`, exposed the
+lock-held delivery deadlock recorded as `AUDIT-FEN-006`. The follow-up
+lock-free publication candidate is statically clean and still requires
+complete GitHub Actions validation.
+
+### AUDIT-FEN-006 | BLOCKER | RESOLVED
+
+ID: `AUDIT-FEN-006`
+
+Severity: `BLOCKER`
+
+Status: `RESOLVED`
+
+Contract: `RC-019`, `RC-021`, `RC-023`, `RC-027`
+
+Backend: FEN
+
+Finding: The first `AUDIT-FEN-005` candidate held `opsMu` while publishing
+events through the default unbuffered `Events` channel. A caller that receives
+one event and then invokes Add or Remove can wait for `opsMu` while the FEN
+handler waits for that same caller to receive another event.
+
+Evidence: `backend_fen.go`; recursive backend integration run `30806727820`,
+illumos job `91663711218`. The unchanged
+`overlapping_roots_are_independent` contract test timed out after ten minutes:
+the FEN read goroutine was blocked in `shared.sendEvent` from
+`updateDirectory`, while the test goroutine was blocked acquiring `opsMu` in
+`AddWith`.
+
+Decision: Complete the native association and ownership transaction under
+`opsMu`, queue its public events and errors in production order, release
+`opsMu`, and only then publish to the public channels. Do not add buffering,
+goroutines, sleeps, retries, or contract exceptions.
+
+Fix commit: `d8e7818ecc36f57cee5b9220134c04aa91f8019e`
+
+Validation runs: the deterministic FEN regression, formatting, and policy
+checks are statically clean; complete corrective GitHub Actions validation is
+pending.
 
 ### AUDIT-FEN-001 | BLOCKER | RESOLVED
 
@@ -414,6 +508,70 @@ Fix commit: `19200f7324cdead2027cd329a39cf94aeddc4179`
 
 Validation runs: pull-request test run `30564186435`; post-merge test run
 `30752070285`.
+
+### AUDIT-KQUEUE-002 | BLOCKER | RESOLVED
+
+ID: `AUDIT-KQUEUE-002`
+
+Severity: `BLOCKER`
+
+Status: `RESOLVED`
+
+Contract: `RC-019`, `RC-020`, `RC-023`, `RC-027`
+
+Backend: kqueue
+
+Finding: `kqueue.Close` returns after closing the wakeup pipe but before the
+read goroutine has closed the public `Events` and `Errors` channels. The stock
+close test consequently observed an open `Events` channel after its existing
+50 millisecond allowance on macOS 15 Intel with Go 1.23.
+
+Evidence: `backend_kqueue.go`; `fsnotify_test.go`; post-merge stock test run
+`30802982900`, job `91651702827`. The pull-request head
+`8cdffe964c1226fb1517cb3b529686268be6b31b` and merge commit
+`a9b0c5b675aa16c048f450a815fed8d51e882579` have the identical tree
+`ed94d3cd9d74845be3a11fbf7dbd511dee0ac6a6`.
+
+Decision: Do not increase the stock-test delay. Give kqueue an explicit read
+loop completion signal and make every `Close` caller wait until descriptor
+cleanup and both public channels have reached their terminal state.
+
+Fix commit: `c06726c69ce16712ff312b15a8c10bc916bb47a1`
+
+Validation runs: the deterministic kqueue close regression and complete
+corrective candidate still require GitHub Actions validation.
+
+### AUDIT-CI-003 | MAJOR | RESOLVED
+
+ID: `AUDIT-CI-003`
+
+Severity: `MAJOR`
+
+Status: `RESOLVED`
+
+Contract: `RC-023`, `RC-027`
+
+Backend: all
+
+Finding: Before the initial contract tag exists, the policy checker permits
+only `d323a68b31cf4a5043d76f95680777b5fa5f6696` as its event base. After the
+Fencing merge at `a9b0c5b675aa16c048f450a815fed8d51e882579`, every corrective
+production pull request would therefore fail policy before its code can be
+validated.
+
+Evidence: `.github/scripts/check-recursive-policy.sh`; post-merge runs
+`30802982672` and `30802982900`.
+
+Decision: Keep the historical Fencing comparison base, but permit event bases
+that descend from the exact merged Fencing candidate until a valid contract
+tag exists. Continue comparing each corrective candidate with its actual pull
+request or push base; do not permit unrelated histories or bypass any file,
+trailer, dependency, formatting, or audit checks.
+
+Fix commit: `b58fabe0e091f3af2bfff09b5f570285b930420d`
+
+Validation runs: candidate `policy` and post-merge `policy` still require
+GitHub Actions validation.
 
 ### AUDIT-WIN-001 | BLOCKER | RESOLVED
 
