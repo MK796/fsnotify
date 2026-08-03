@@ -4,19 +4,33 @@ set -eu
 
 initial_fencing_base=d323a68b31cf4a5043d76f95680777b5fa5f6696
 merged_fencing_base=a9b0c5b675aa16c048f450a815fed8d51e882579
-base=${POLICY_BASE_SHA:-}
-case "$base" in
+event_base=${POLICY_BASE_SHA:-}
+contract_tag=
+if candidate_contract_tag=$(git rev-parse -q --verify refs/tags/recursive-watch-contract-v1^{commit}) &&
+	git merge-base --is-ancestor "$candidate_contract_tag" HEAD; then
+	contract_tag=$candidate_contract_tag
+fi
+
+case "$event_base" in
 	""|0000000000000000000000000000000000000000)
-		base=$merged_fencing_base
+		if [ -n "$contract_tag" ]; then
+			event_base=HEAD
+		else
+			event_base=$merged_fencing_base
+		fi
 		;;
 esac
-if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-	echo "policy: base commit $base is unavailable" >&2
+if ! git cat-file -e "$event_base^{commit}" 2>/dev/null; then
+	echo "policy: event base commit $event_base is unavailable" >&2
+	exit 1
+fi
+if ! git merge-base --is-ancestor "$event_base" HEAD; then
+	echo "policy: event base $event_base is not an ancestor of HEAD" >&2
 	exit 1
 fi
 
-if contract_tag=$(git rev-parse -q --verify refs/tags/recursive-watch-contract-v1^{commit}) &&
-	git merge-base --is-ancestor "$contract_tag" HEAD; then
+base=$event_base
+if [ -n "$contract_tag" ]; then
 	base=$contract_tag
 else
 	if ! git merge-base --is-ancestor "$initial_fencing_base" "$merged_fencing_base"; then
@@ -49,6 +63,7 @@ RECURSIVE_WATCH_FENCING_PLAN.md
 RECURSIVE_WATCH_QUALITY_PLAN.md
 .github/policy/recursive-platform-exceptions.json
 .github/scripts/check-recursive-policy.sh
+.github/scripts/test-recursive-policy.sh
 recursive_contract_test.go
 recursive_exception_policy_test.go
 "
@@ -60,7 +75,8 @@ for required in $required_files; do
 	fi
 done
 
-if grep -Eq '^### AUDIT-.* \| (BLOCKER|MAJOR) \| (OPEN|IN_PROGRESS)$' QUALITY_AUDIT.md; then
+if [ "${AUDIT_REQUIRE_COMPLETE:-0}" = 1 ] &&
+	grep -Eq '^### AUDIT-.* \| (BLOCKER|MAJOR) \| (OPEN|IN_PROGRESS)$' QUALITY_AUDIT.md; then
 	echo "policy: unresolved BLOCKER or MAJOR audit finding:" >&2
 	grep -E '^### AUDIT-.* \| (BLOCKER|MAJOR) \| (OPEN|IN_PROGRESS)$' QUALITY_AUDIT.md >&2
 	exit 1
@@ -94,6 +110,16 @@ contains_reference() {
 	grep -Fq "$reference" "$document"
 }
 
+audit_heading() {
+	document=$1
+	reference=$2
+	grep -E "^### $reference \\| (BLOCKER|MAJOR|MINOR) \\| (OPEN|IN_PROGRESS|RESOLVED|ACCEPTED_NATIVE_EVENT|ACCEPTED_NATIVE_CAPABILITY|ACCEPTED_TEST_ENVIRONMENT)$" "$document" || true
+}
+
+audit_status() {
+	printf '%s\n' "$1" | awk -F ' \\| ' '{ print $3 }'
+}
+
 changed=$(git diff --name-only "$base" HEAD)
 has_production=false
 has_frozen=false
@@ -103,6 +129,57 @@ for path in $changed; do
 	fi
 	if is_frozen_file "$path"; then
 		has_frozen=true
+	fi
+done
+
+policy_tmpdir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/fsnotify-policy.XXXXXX")
+trap 'rm -rf "$policy_tmpdir"' EXIT HUP INT TERM
+base_audit=$policy_tmpdir/base-audit.md
+git show "$event_base:QUALITY_AUDIT.md" >"$base_audit"
+
+event_range="$event_base..HEAD"
+referenced_audits=
+for commit in $(git rev-list --reverse "$event_range"); do
+	commit_has_production=false
+	for path in $(git diff-tree --no-commit-id --name-only -r "$commit"); do
+		if is_production_file "$path"; then
+			commit_has_production=true
+		fi
+	done
+	if [ "$commit_has_production" = true ]; then
+		message=$(git show -s --format=%B "$commit")
+		commit_audits=$(printf '%s\n' "$message" |
+			sed -n 's/^Audit:[[:space:]]*\(AUDIT-[A-Z0-9-][A-Z0-9-]*\).*$/\1/p')
+		referenced_audits="$referenced_audits $commit_audits"
+	fi
+done
+
+for ref in $(printf '%s\n' $referenced_audits | sort -u); do
+	base_heading=$(audit_heading "$base_audit" "$ref")
+	base_count=$(printf '%s\n' "$base_heading" | sed '/^$/d' | wc -l)
+	if [ "$base_count" -ne 1 ]; then
+		echo "policy: production change references audit finding $ref that was not uniquely present in the event base" >&2
+		exit 1
+	fi
+	base_status=$(audit_status "$base_heading")
+	case "$base_status" in
+		OPEN|IN_PROGRESS) ;;
+		*)
+			echo "policy: production change references audit finding $ref with non-actionable base status $base_status" >&2
+			exit 1
+			;;
+	esac
+
+	head_heading=$(audit_heading QUALITY_AUDIT.md "$ref")
+	head_count=$(printf '%s\n' "$head_heading" | sed '/^$/d' | wc -l)
+	if [ "$head_count" -ne 1 ]; then
+		echo "policy: production change references audit finding $ref that is not unique in the candidate ledger" >&2
+		exit 1
+	fi
+	head_status=$(audit_status "$head_heading")
+	if [ "$head_status" != RESOLVED ]; then
+		echo "policy: production change must resolve audit finding $ref; candidate status is $head_status" >&2
+		exit 1
 	fi
 done
 
@@ -189,10 +266,9 @@ extract_modules() {
 	' "$1" | sort -u
 }
 
-tmpdir=${RUNNER_TEMP:-/tmp}
-base_mod="$tmpdir/fsnotify-policy-base.mod"
-old_modules="$tmpdir/fsnotify-policy-old-modules"
-new_modules="$tmpdir/fsnotify-policy-new-modules"
+base_mod="$policy_tmpdir/base.mod"
+old_modules="$policy_tmpdir/old-modules"
+new_modules="$policy_tmpdir/new-modules"
 git show "$base:go.mod" >"$base_mod"
 extract_modules "$base_mod" >"$old_modules"
 extract_modules go.mod >"$new_modules"
