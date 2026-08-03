@@ -1,5 +1,15 @@
 # Changelog
 
+Unreleased
+----------
+
+### Additions
+
+- all: add recursive directory watches with a final `...` path component.
+  Existing descendants and directories created or moved into the tree are
+  watched automatically.
+
+
 1.10.1 2026-05-04
 -----------------
 

@@ -92,10 +92,18 @@ FAQ
 No, not unless you are watching the location it was moved to.
 
 ### Are subdirectories watched?
-No, you must add watches for any directory you want to watch (a recursive
-watcher is on the roadmap: [#18]).
+Not by default. To watch a directory and all of its descendants, add a final
+`...` path component:
 
-[#18]: https://github.com/fsnotify/fsnotify/issues/18
+```go
+watcher.Add(filepath.Join(root, "..."))
+```
+
+All existing subdirectories are watched, and directories created or moved
+into the tree are registered automatically. `WatchList` returns the recursive
+root without the trailing marker. Either `Remove(root)` or
+`Remove(filepath.Join(root, "..."))` removes that recursive root; explicitly
+added descendants and overlapping recursive roots remain watched.
 
 ### Why don't notifications work with NFS, SMB, FUSE, /proc, or /sys?
 fsnotify requires support from underlying OS to work. The current NFS and SMB
