@@ -787,13 +787,13 @@ Fix commit: `ci: group backend jobs by platform family`
 Validation runs: updated pull-request policy, stock, Staticcheck, and recursive
 backend workflows required.
 
-### AUDIT-CI-007 | MAJOR | RESOLVED
+### AUDIT-CI-007 | MAJOR | OPEN
 
 ID: `AUDIT-CI-007`
 
 Severity: `MAJOR`
 
-Status: `RESOLVED`
+Status: `OPEN`
 
 Contract: `RC-027`
 
@@ -804,15 +804,22 @@ finding globally. This made the required audit-first workflow impossible:
 recording a genuine finding immediately blocked every candidate, including an
 independent fix for that finding.
 
-Evidence: `.github/scripts/check-recursive-policy.sh` before this correction;
-the quality plan requires findings to exist before production changes begin.
+Evidence: `.github/scripts/check-recursive-policy.sh` before the original
+correction; the quality plan requires findings to exist before production
+changes begin. The policy step in pull request 26 accepted four newly recorded
+open blockers, but `test-recursive-policy.sh` then cloned that real candidate
+ledger into every fixture. Its completion-mode success case consequently
+failed on the unrelated real findings instead of testing its own synthetic
+ledger transition.
 
 Decision: Permit unresolved findings during normal incremental audit work. A
 production change must reference a finding that uniquely existed as `OPEN` or
 `IN_PROGRESS` in the event base and must leave it `RESOLVED` in the candidate.
 Unrelated open findings do not block independent work. An explicit
 `AUDIT_REQUIRE_COMPLETE=1` mode remains available for final release gates and
-rejects every unresolved BLOCKER or MAJOR finding.
+rejects every unresolved BLOCKER or MAJOR finding. Every self-test case must
+start from a synthetic clean fixture ledger so current repository findings
+cannot alter the expected result.
 
 Fix commit: `ci: allow incremental recursive audit findings`
 
