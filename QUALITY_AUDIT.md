@@ -11,6 +11,7 @@ Upstream base: 20b1e15
 Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
 Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
+Merged fencing candidate: a9b0c5b675aa16c048f450a815fed8d51e882579
 Working branch: quality/recursive-watch-v1
 Contract tag: not valid until created on a green main commit
 ```
@@ -301,13 +302,13 @@ Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-003 | BLOCKER | RESOLVED
+### AUDIT-FEN-003 | BLOCKER | IN_PROGRESS
 
 ID: `AUDIT-FEN-003`
 
 Severity: `BLOCKER`
 
-Status: `RESOLVED`
+Status: `IN_PROGRESS`
 
 Contract: `RC-003`, `RC-023`
 
@@ -319,18 +320,25 @@ repetitions timed out while checking the pre-existing descendant set.
 
 Evidence: `backend_fen.go`; `recursive_contract_test.go`; pull request 16;
 recursive backend integration run `30753558574`, illumos job `91511737837`.
+The same missing existing-descendant event recurred after the Fencing merge in
+recursive backend integration run `30802982672`, illumos job `91651702258`,
+while the other nine identical repetitions passed.
 
-Decision: Preserve the platform-identical contract. Pull request 17 added
-focused existing-descendant coverage and corrected EventPort re-association so
-changes racing with a scan are either observed by that scan or queue a later
-event.
+Decision: Preserve the platform-identical contract. The pull request 17 rearm
+fix is insufficient: an EventPort association consumed by a non-terminal
+directory event still has a one-shot interval before re-association. A change
+inside that interval can be lost unless the directory is reconciled after the
+association is restored, independent of the native event bit that consumed it.
+Correct the FEN event path without changing the common contract or its
+deadline.
 
 Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
 `a73009a30890d362b3470900d1d7b9ffe7f6170c`
 
-Validation runs: focused FEN stress `30756792254`; complete candidates
-`30757372940` and `30757583507`; post-merge stock test `30795667697`;
-post-merge staticcheck `30795667675`.
+Validation runs: previous evidence is focused FEN stress `30756792254`;
+complete candidates `30757372940` and `30757583507`; post-merge stock test
+`30795667697`; post-merge staticcheck `30795667675`. A new focused FEN
+regression and complete candidate are required.
 
 ### AUDIT-FEN-004 | BLOCKER | RESOLVED
 
@@ -414,6 +422,69 @@ Fix commit: `19200f7324cdead2027cd329a39cf94aeddc4179`
 
 Validation runs: pull-request test run `30564186435`; post-merge test run
 `30752070285`.
+
+### AUDIT-KQUEUE-002 | BLOCKER | IN_PROGRESS
+
+ID: `AUDIT-KQUEUE-002`
+
+Severity: `BLOCKER`
+
+Status: `IN_PROGRESS`
+
+Contract: `RC-019`, `RC-020`, `RC-023`, `RC-027`
+
+Backend: kqueue
+
+Finding: `kqueue.Close` returns after closing the wakeup pipe but before the
+read goroutine has closed the public `Events` and `Errors` channels. The stock
+close test consequently observed an open `Events` channel after its existing
+50 millisecond allowance on macOS 15 Intel with Go 1.23.
+
+Evidence: `backend_kqueue.go`; `fsnotify_test.go`; post-merge stock test run
+`30802982900`, job `91651702827`. The pull-request head
+`8cdffe964c1226fb1517cb3b529686268be6b31b` and merge commit
+`a9b0c5b675aa16c048f450a815fed8d51e882579` have the identical tree
+`ed94d3cd9d74845be3a11fbf7dbd511dee0ac6a6`.
+
+Decision: Do not increase the stock-test delay. Give kqueue an explicit read
+loop completion signal and make every `Close` caller wait until descriptor
+cleanup and both public channels have reached their terminal state.
+
+Fix commit:
+
+Validation runs: focused kqueue close lifecycle and complete candidate
+required.
+
+### AUDIT-CI-003 | MAJOR | IN_PROGRESS
+
+ID: `AUDIT-CI-003`
+
+Severity: `MAJOR`
+
+Status: `IN_PROGRESS`
+
+Contract: `RC-023`, `RC-027`
+
+Backend: all
+
+Finding: Before the initial contract tag exists, the policy checker permits
+only `d323a68b31cf4a5043d76f95680777b5fa5f6696` as its event base. After the
+Fencing merge at `a9b0c5b675aa16c048f450a815fed8d51e882579`, every corrective
+production pull request would therefore fail policy before its code can be
+validated.
+
+Evidence: `.github/scripts/check-recursive-policy.sh`; post-merge runs
+`30802982672` and `30802982900`.
+
+Decision: Keep the historical Fencing comparison base, but permit event bases
+that descend from the exact merged Fencing candidate until a valid contract
+tag exists. Continue comparing each corrective candidate with its actual pull
+request or push base; do not permit unrelated histories or bypass any file,
+trailer, dependency, formatting, or audit checks.
+
+Fix commit:
+
+Validation runs: candidate `policy` and post-merge `policy` required.
 
 ### AUDIT-WIN-001 | BLOCKER | RESOLVED
 
