@@ -377,13 +377,13 @@ Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-005 | BLOCKER | OPEN
+### AUDIT-FEN-005 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-005`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-003`, `RC-008`, `RC-009`, `RC-011`, `RC-019`, `RC-020`,
 `RC-023`, `RC-026`, `RC-027`
@@ -413,19 +413,22 @@ shared shutdown signal before waiting for the lock, close the EventPort under
 that lock, and wait for the read loop to close both public channels. Queued
 events that reach the handler after shutdown must not mutate state.
 
-Fix commit: `8696f5503312c1cfd0ab92ee065b2b308c9fa1f3`
+Fix commits: `8696f5503312c1cfd0ab92ee065b2b308c9fa1f3`,
+`d8e7818ecc36f57cee5b9220134c04aa91f8019e`
 
 Validation runs: implementation and backend regression are statically clean;
 corrective run `30806727820`, illumos job `91663711218`, exposed the
-lock-held delivery deadlock recorded as `AUDIT-FEN-006`.
+lock-held delivery deadlock recorded as `AUDIT-FEN-006`. The follow-up
+lock-free publication candidate is statically clean and still requires
+complete GitHub Actions validation.
 
-### AUDIT-FEN-006 | BLOCKER | OPEN
+### AUDIT-FEN-006 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-006`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-019`, `RC-021`, `RC-023`, `RC-027`
 
@@ -448,9 +451,11 @@ Decision: Complete the native association and ownership transaction under
 `opsMu`, and only then publish to the public channels. Do not add buffering,
 goroutines, sleeps, retries, or contract exceptions.
 
-Fix commit: pending
+Fix commit: `d8e7818ecc36f57cee5b9220134c04aa91f8019e`
 
-Validation runs: pending corrective GitHub Actions candidate.
+Validation runs: the deterministic FEN regression, formatting, and policy
+checks are statically clean; complete corrective GitHub Actions validation is
+pending.
 
 ### AUDIT-FEN-001 | BLOCKER | RESOLVED
 
