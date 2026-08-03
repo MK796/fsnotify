@@ -787,13 +787,13 @@ Fix commit: `ci: group backend jobs by platform family`
 Validation runs: updated pull-request policy, stock, Staticcheck, and recursive
 backend workflows required.
 
-### AUDIT-CI-007 | MAJOR | OPEN
+### AUDIT-CI-007 | MAJOR | RESOLVED
 
 ID: `AUDIT-CI-007`
 
 Severity: `MAJOR`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-027`
 
@@ -821,11 +821,13 @@ rejects every unresolved BLOCKER or MAJOR finding. Every self-test case must
 start from a synthetic clean fixture ledger so current repository findings
 cannot alter the expected result.
 
-Fix commit: `ci: allow incremental recursive audit findings`
+Fix commits: `ci: allow incremental recursive audit findings`;
+`test: isolate policy audit fixtures`
 
-Validation runs: policy self-tests cover open-ledger, valid transition,
-unresolved, same-candidate, already-resolved, independent-finding, and final
-completion cases; one complete pull-request run is required.
+Validation runs: policy self-tests cover source-ledger isolation, open-ledger,
+valid transition, unresolved, same-candidate, already-resolved,
+independent-finding, and final completion cases; one complete pull-request run
+is required.
 
 ### AUDIT-CI-008 | MAJOR | RESOLVED
 
