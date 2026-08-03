@@ -44,6 +44,25 @@ type fenRename struct {
 	info os.FileInfo
 }
 
+type fenNotification struct {
+	event Event
+	err   error
+}
+
+type fenNotifications []fenNotification
+
+func (n *fenNotifications) addEvent(event Event) {
+	if event.Op != 0 {
+		*n = append(*n, fenNotification{event: event})
+	}
+}
+
+func (n *fenNotifications) addError(err error) {
+	if err != nil {
+		*n = append(*n, fenNotification{err: err})
+	}
+}
+
 var defaultBufferSize = 0
 
 func newBackend(ev chan Event, errs chan error) (backend, error) {
@@ -234,7 +253,7 @@ func (w *fen) directoryNeedsScanLocked(path string, owners map[string]struct{}) 
 	return false
 }
 
-func (w *fen) dropPhysical(path string, tree bool) {
+func (w *fen) dropPhysical(path string, tree bool, notifications *fenNotifications) {
 	w.mu.Lock()
 	var removedUser []string
 	for tracked := range w.owners {
@@ -263,9 +282,7 @@ func (w *fen) dropPhysical(path string, tree bool) {
 		return len(removedUser[i]) > len(removedUser[j])
 	})
 	for _, removed := range removedUser {
-		if !w.sendEvent(Event{Name: removed, Op: Remove}) {
-			return
-		}
+		notifications.addEvent(Event{Name: removed, Op: Remove})
 	}
 }
 
@@ -504,9 +521,29 @@ func (w *fen) handleDirectory(path string, stat os.FileInfo, follow bool, handle
 // had the attributes changed between when the association was created and the
 // when event was returned)
 func (w *fen) handleEvent(event *unix.PortEvent) error {
+	// Keep native associations and ownership atomic with Add and Remove, but
+	// never hold the lifecycle lock while publishing to user channels.
 	w.opsMu.Lock()
-	defer w.opsMu.Unlock()
+	var notifications fenNotifications
+	err := w.handleEventLocked(event, &notifications)
+	w.opsMu.Unlock()
 
+	for _, notification := range notifications {
+		if notification.err != nil {
+			if !w.sendError(notification.err) {
+				return nil
+			}
+			continue
+		}
+		if !w.sendEvent(notification.event) {
+			return nil
+		}
+	}
+	return err
+}
+
+// handleEventLocked applies one native event atomically. w.opsMu must be held.
+func (w *fen) handleEventLocked(event *unix.PortEvent, notifications *fenNotifications) error {
 	// Close can unblock EventPort.Get before this queued event reaches the
 	// handler. Such an event must not restore associations or ownership.
 	if w.isClosed() {
@@ -534,15 +571,11 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 	isWatched := watchedDir || watchedPath
 
 	if events&unix.FILE_DELETE != 0 {
-		if !w.sendEvent(Event{Name: path, Op: Remove}) {
-			return nil
-		}
+		notifications.addEvent(Event{Name: path, Op: Remove})
 		reRegister = false
 	}
 	if events&unix.FILE_RENAME_FROM != 0 {
-		if !w.sendEvent(Event{Name: path, Op: Rename}) {
-			return nil
-		}
+		notifications.addEvent(Event{Name: path, Op: Rename})
 		if fmode.IsDir() {
 			w.rememberRename(path)
 			dropTree = true
@@ -558,9 +591,7 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 
 		// inotify reports a Remove event in this case, so we simulate this
 		// here.
-		if !w.sendEvent(Event{Name: path, Op: Remove}) {
-			return nil
-		}
+		notifications.addEvent(Event{Name: path, Op: Remove})
 		dropTree = fmode.IsDir()
 		// Don't keep watching the file that was removed
 		reRegister = false
@@ -573,7 +604,7 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		// would discard children whose events have not fired yet. A rename is
 		// different: descendants left the watched namespace with their parent
 		// and must be removed immediately.
-		w.dropPhysical(path, dropTree)
+		w.dropPhysical(path, dropTree, notifications)
 		return nil
 	}
 
@@ -589,12 +620,10 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		// get here, the sudirectory is already gone. Clearly we were watching
 		// this path but now it is gone. Let's tell the user that it was
 		// removed.
-		if !w.sendEvent(Event{Name: path, Op: Remove}) {
-			return nil
-		}
+		notifications.addEvent(Event{Name: path, Op: Remove})
 		// Preserve child associations for the same reason as FILE_DELETE
 		// above: each child still needs to deliver its own removal event.
-		w.dropPhysical(path, false)
+		w.dropPhysical(path, false, notifications)
 		// Suppress extra write events on removed directories; they are not
 		// informative and can be confusing.
 		return nil
@@ -607,10 +636,8 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		if err != nil {
 			// The symlink still exists, but the target is gone. Report the
 			// Remove similar to above.
-			if !w.sendEvent(Event{Name: path, Op: Remove}) {
-				return nil
-			}
-			w.dropPhysical(path, false)
+			notifications.addEvent(Event{Name: path, Op: Remove})
+			w.dropPhysical(path, false, notifications)
 			return nil
 		}
 	}
@@ -622,7 +649,7 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		// Preserve child associations: pending child events still have to clear
 		// their own physical and logical state.
-		w.dropPhysical(path, false)
+		w.dropPhysical(path, false, notifications)
 		return nil
 	}
 	if err != nil {
@@ -633,20 +660,16 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 	// event. Reconcile after rearming regardless of the event bit: a child
 	// created during the one-shot gap cannot queue its own directory event.
 	if fmode.IsDir() && watchedDir {
-		if err := w.updateDirectory(path); err != nil {
+		if err := w.updateDirectory(path, notifications); err != nil {
 			return err
 		}
 	} else if events&unix.FILE_MODIFIED != 0 {
-		if !w.sendEvent(Event{Name: path, Op: Write}) {
-			return nil
-		}
+		notifications.addEvent(Event{Name: path, Op: Write})
 	}
 	if events&unix.FILE_ATTRIB != 0 && stat != nil {
 		// Only send Chmod if perms changed
 		if stat.Mode().Perm() != fmode.Perm() {
-			if !w.sendEvent(Event{Name: path, Op: Chmod}) {
-				return nil
-			}
+			notifications.addEvent(Event{Name: path, Op: Chmod})
 		}
 	}
 
@@ -656,7 +679,7 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 // The directory was modified, so we must find unwatched entities and watch
 // them. If something was removed from the directory, nothing will happen, as
 // everything else should still be watched.
-func (w *fen) updateDirectory(path string) error {
+func (w *fen) updateDirectory(path string, notifications *fenNotifications) error {
 	files, err := os.ReadDir(path)
 	if err != nil {
 		// Directory no longer exists: probably just deleted since we got the
@@ -694,22 +717,16 @@ func (w *fen) updateDirectory(path string) error {
 					if errors.Is(err, fs.ErrNotExist) {
 						continue
 					}
-					if !w.sendError(err) {
-						return nil
-					}
+					notifications.addError(err)
 				}
-				if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
-					return nil
-				}
+				notifications.addEvent(Event{Name: entryPath, Op: Create})
 				continue
 			}
-			if err := w.addRecursiveSubdir(entryPath, owners, recursiveOwners); err != nil {
+			if err := w.addRecursiveSubdir(entryPath, owners, recursiveOwners, notifications); err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
 					continue
 				}
-				if !w.sendError(err) {
-					return nil
-				}
+				notifications.addError(err)
 			}
 			continue
 		}
@@ -718,12 +735,8 @@ func (w *fen) updateDirectory(path string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if !w.sendError(err) {
-			return nil
-		}
-		if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
-			return nil
-		}
+		notifications.addError(err)
+		notifications.addEvent(Event{Name: entryPath, Op: Create})
 	}
 	return nil
 }
@@ -745,7 +758,11 @@ func (w *fen) addRenamedSubdir(root string, rootOwners, recursiveOwners []string
 	})
 }
 
-func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []string) error {
+func (w *fen) addRecursiveSubdir(
+	root string,
+	rootOwners, recursiveOwners []string,
+	notifications *fenNotifications,
+) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -764,9 +781,7 @@ func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []stri
 		if err := w.associateOwned(path, stat, false, w.opForOwners(owners), owners, d.IsDir()); err != nil {
 			return err
 		}
-		if !w.sendEvent(Event{Name: path, Op: Create}) {
-			return nil
-		}
+		notifications.addEvent(Event{Name: path, Op: Create})
 		return nil
 	})
 }

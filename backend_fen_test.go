@@ -263,6 +263,63 @@ func TestFenRecursiveRenameCoverage(t *testing.T) {
 	}
 }
 
+func TestFenEventDeliveryDoesNotHoldLifecycleLock(t *testing.T) {
+	root := t.TempDir()
+	watcher := newWatcher(t, join(root, "..."))
+	defer watcher.Close()
+	fen := watcher.b.(*fen)
+
+	// Keep the handler behind the lifecycle transaction until both children
+	// exist, so one directory reconciliation has multiple events to publish.
+	fen.opsMu.Lock()
+	for _, name := range []string{"a", "b"} {
+		if err := os.WriteFile(join(root, name), nil, 0o600); err != nil {
+			fen.opsMu.Unlock()
+			t.Fatal(err)
+		}
+	}
+	fen.opsMu.Unlock()
+
+	firstDeadline := time.NewTimer(5 * time.Second)
+	defer firstDeadline.Stop()
+	select {
+	case event, ok := <-watcher.Events:
+		if !ok {
+			t.Fatal("Events closed before first reconciled event")
+		}
+		if event.Name != join(root, "a") && event.Name != join(root, "b") {
+			t.Fatalf("first reconciled event = %v; want child Create", event)
+		}
+	case err, ok := <-watcher.Errors:
+		if !ok {
+			t.Fatal("Errors closed before first reconciled event")
+		}
+		t.Fatalf("watcher error before first reconciled event: %v", err)
+	case <-firstDeadline.C:
+		t.Fatal("first reconciled event did not arrive")
+	}
+
+	addDone := make(chan error, 1)
+	go func() {
+		addDone <- watcher.Add(join(root, "..."))
+	}()
+	addDeadline := time.NewTimer(5 * time.Second)
+	defer addDeadline.Stop()
+	select {
+	case err := <-addDone:
+		if err != nil {
+			t.Fatalf("Add while event delivery was backpressured: %v", err)
+		}
+	case err, ok := <-watcher.Errors:
+		if !ok {
+			t.Fatal("Errors closed while Add was pending")
+		}
+		t.Fatalf("watcher error while Add was pending: %v", err)
+	case <-addDeadline.C:
+		t.Fatal("event delivery retained the lifecycle lock")
+	}
+}
+
 func TestFenCloseWhileGetBlocked(t *testing.T) {
 	for range 100 {
 		watcher, err := NewWatcher()
