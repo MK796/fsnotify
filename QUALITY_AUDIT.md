@@ -121,13 +121,13 @@ Fix commit: `docs: align recursive watch documentation`
 
 Validation runs: candidate documentation and policy checks required.
 
-### AUDIT-COMMON-002 | MINOR | OPEN
+### AUDIT-COMMON-002 | MINOR | RESOLVED
 
 ID: `AUDIT-COMMON-002`
 
 Severity: `MINOR`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-001`, `RC-027`
 
@@ -146,9 +146,9 @@ Decision: In a separate production change, remove the variable and dead branch
 while preserving path cleaning, marker recognition, all public behavior, and
 the complete contract suite.
 
-Fix commit: pending
+Fix commit: `refactor: remove obsolete recursive feature gate`
 
-Validation runs: pending
+Validation runs: candidate full CI required.
 
 Before this systematic pass, three production blockers discovered by the
 initial Fencing contract run were resolved through pull request 17 and

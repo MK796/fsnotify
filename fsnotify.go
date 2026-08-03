@@ -456,15 +456,10 @@ func withCreate() addOpt {
 	return func(opt *withOpts) { opt.sendCreate = true }
 }
 
-var enableRecurse = true
-
 // Check if this path is recursive (ends with "/..." or "\..."), and return the
 // path with the /... stripped.
 func recursivePath(path string) (string, bool) {
 	path = filepath.Clean(path)
-	if !enableRecurse {
-		return path, false
-	}
 	if filepath.Base(path) == "..." {
 		return filepath.Dir(path), true
 	}
