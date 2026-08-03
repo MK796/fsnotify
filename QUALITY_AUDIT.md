@@ -377,13 +377,13 @@ Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-005 | BLOCKER | RESOLVED
+### AUDIT-FEN-005 | BLOCKER | OPEN
 
 ID: `AUDIT-FEN-005`
 
 Severity: `BLOCKER`
 
-Status: `RESOLVED`
+Status: `OPEN`
 
 Contract: `RC-003`, `RC-008`, `RC-009`, `RC-011`, `RC-019`, `RC-020`,
 `RC-023`, `RC-026`, `RC-027`
@@ -405,17 +405,52 @@ owners, a stale prefix-similar renamed root, and two
 operations. The surrounding SSH session completed normally and only reported
 the inner `go test` exit status.
 
-Decision: Treat Add, Remove, one complete event-handling transaction, and the
-EventPort portion of Close as one serialized FEN lifecycle. Close must publish
-the shared shutdown signal before waiting for the lifecycle lock so a handler
-blocked by Events backpressure can exit. Close must then close the EventPort
-under that lock and wait for the read loop to close both public channels.
-Queued events that reach the handler after shutdown must not mutate state.
+Decision: Treat Add, Remove, one complete event-state transaction, and the
+EventPort portion of Close as one serialized FEN lifecycle. Event and error
+delivery is not part of that critical section; it must occur in unchanged
+order after state mutation releases the lifecycle lock. Close must publish the
+shared shutdown signal before waiting for the lock, close the EventPort under
+that lock, and wait for the read loop to close both public channels. Queued
+events that reach the handler after shutdown must not mutate state.
 
 Fix commit: `8696f5503312c1cfd0ab92ee065b2b308c9fa1f3`
 
 Validation runs: implementation and backend regression are statically clean;
-the complete corrective GitHub Actions candidate is pending.
+corrective run `30806727820`, illumos job `91663711218`, exposed the
+lock-held delivery deadlock recorded as `AUDIT-FEN-006`.
+
+### AUDIT-FEN-006 | BLOCKER | OPEN
+
+ID: `AUDIT-FEN-006`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-019`, `RC-021`, `RC-023`, `RC-027`
+
+Backend: FEN
+
+Finding: The first `AUDIT-FEN-005` candidate held `opsMu` while publishing
+events through the default unbuffered `Events` channel. A caller that receives
+one event and then invokes Add or Remove can wait for `opsMu` while the FEN
+handler waits for that same caller to receive another event.
+
+Evidence: `backend_fen.go`; recursive backend integration run `30806727820`,
+illumos job `91663711218`. The unchanged
+`overlapping_roots_are_independent` contract test timed out after ten minutes:
+the FEN read goroutine was blocked in `shared.sendEvent` from
+`updateDirectory`, while the test goroutine was blocked acquiring `opsMu` in
+`AddWith`.
+
+Decision: Complete the native association and ownership transaction under
+`opsMu`, queue its public events and errors in production order, release
+`opsMu`, and only then publish to the public channels. Do not add buffering,
+goroutines, sleeps, retries, or contract exceptions.
+
+Fix commit: pending
+
+Validation runs: pending corrective GitHub Actions candidate.
 
 ### AUDIT-FEN-001 | BLOCKER | RESOLVED
 
