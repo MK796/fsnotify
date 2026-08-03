@@ -25,15 +25,16 @@ type fen struct {
 	Events chan Event
 	Errors chan error
 
-	opsMu   sync.Mutex // Serializes public Add and Remove transactions.
-	mu      sync.Mutex
-	port    *unix.EventPort
-	dirs    map[string]Op                  // Associated directories.
-	watches map[string]Op                  // Associated non-directories.
-	byUser  map[string]Op                  // Paths added through Add().
-	recurse map[string]Op                  // Recursive roots → Op filter.
-	owners  map[string]map[string]struct{} // Associated path → Add() roots.
-	info    map[string]os.FileInfo         // Last identity associated with a path.
+	doneResp chan struct{}
+	opsMu    sync.Mutex // Serializes Add, Remove, event handling, and Close.
+	mu       sync.Mutex
+	port     *unix.EventPort
+	dirs     map[string]Op                  // Associated directories.
+	watches  map[string]Op                  // Associated non-directories.
+	byUser   map[string]Op                  // Paths added through Add().
+	recurse  map[string]Op                  // Recursive roots → Op filter.
+	owners   map[string]map[string]struct{} // Associated path → Add() roots.
+	info     map[string]os.FileInfo         // Last identity associated with a path.
 
 	renames     [10]fenRename
 	renameIndex uint8
@@ -47,15 +48,16 @@ var defaultBufferSize = 0
 
 func newBackend(ev chan Event, errs chan error) (backend, error) {
 	w := &fen{
-		shared:  newShared(ev, errs),
-		Events:  ev,
-		Errors:  errs,
-		dirs:    make(map[string]Op),
-		watches: make(map[string]Op),
-		byUser:  make(map[string]Op),
-		recurse: make(map[string]Op),
-		owners:  make(map[string]map[string]struct{}),
-		info:    make(map[string]os.FileInfo),
+		shared:   newShared(ev, errs),
+		Events:   ev,
+		Errors:   errs,
+		doneResp: make(chan struct{}),
+		dirs:     make(map[string]Op),
+		watches:  make(map[string]Op),
+		byUser:   make(map[string]Op),
+		recurse:  make(map[string]Op),
+		owners:   make(map[string]map[string]struct{}),
+		info:     make(map[string]os.FileInfo),
 	}
 
 	var err error
@@ -69,10 +71,20 @@ func newBackend(ev chan Event, errs chan error) (backend, error) {
 }
 
 func (w *fen) Close() error {
-	if w.shared.close() {
-		return nil
+	// Publish shutdown before waiting for an in-flight event handler. This
+	// releases handlers blocked while sending to an unconsumed public channel.
+	alreadyClosed := w.shared.close()
+	if !alreadyClosed {
+		w.opsMu.Lock()
+		err := w.port.Close()
+		w.opsMu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
-	return w.port.Close()
+
+	<-w.doneResp
+	return nil
 }
 
 func (w *fen) Add(name string) error { return w.AddWith(name) }
@@ -418,6 +430,7 @@ func (w *fen) readEvents() {
 	defer func() {
 		close(w.Errors)
 		close(w.Events)
+		close(w.doneResp)
 	}()
 
 	pevents := make([]unix.PortEvent, 8)
@@ -491,6 +504,15 @@ func (w *fen) handleDirectory(path string, stat os.FileInfo, follow bool, handle
 // had the attributes changed between when the association was created and the
 // when event was returned)
 func (w *fen) handleEvent(event *unix.PortEvent) error {
+	w.opsMu.Lock()
+	defer w.opsMu.Unlock()
+
+	// Close can unblock EventPort.Get before this queued event reaches the
+	// handler. Such an event must not restore associations or ownership.
+	if w.isClosed() {
+		return nil
+	}
+
 	var (
 		events     = event.Events
 		path       = event.Path
