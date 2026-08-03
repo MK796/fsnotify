@@ -112,6 +112,33 @@ func TestRemoveState(t *testing.T) {
 	check(0, 0)
 }
 
+func TestKqueueCloseWaitsForReadLoop(t *testing.T) {
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case _, ok := <-w.Events:
+		if ok {
+			t.Fatal("Events remained open after Close")
+		}
+	default:
+		t.Fatal("Events remained open after Close")
+	}
+	select {
+	case err, ok := <-w.Errors:
+		if ok {
+			t.Fatalf("Errors remained open after Close: %v", err)
+		}
+	default:
+		t.Fatal("Errors remained open after Close")
+	}
+}
+
 func TestKqueueInternalDirectoryDoesNotRescan(t *testing.T) {
 	root := t.TempDir()
 	child := join(root, "child")
