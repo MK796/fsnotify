@@ -69,7 +69,9 @@ A Recursive Control Contract difference cannot use an `ACCEPTED_*` status.
 The systematic production-code audit has not started. Three production
 blockers discovered by the initial Fencing contract run were resolved through
 pull request 17 and independently validated before the Fencing work was
-rebased onto the corrected production base.
+rebased onto the corrected production base. The first post-merge Fencing runs
+then exposed one remaining FEN observation gap and one asynchronous kqueue
+shutdown gap; both have narrowly scoped corrective candidates below.
 
 ### AUDIT-TEST-001 | MAJOR | RESOLVED
 
@@ -302,13 +304,13 @@ Validation runs: focused FEN stress `30756792254`; complete candidates
 `30757372940` and `30757583507`; post-merge stock test `30795667697`;
 post-merge staticcheck `30795667675`.
 
-### AUDIT-FEN-003 | BLOCKER | IN_PROGRESS
+### AUDIT-FEN-003 | BLOCKER | RESOLVED
 
 ID: `AUDIT-FEN-003`
 
 Severity: `BLOCKER`
 
-Status: `IN_PROGRESS`
+Status: `RESOLVED`
 
 Contract: `RC-003`, `RC-023`
 
@@ -333,12 +335,14 @@ Correct the FEN event path without changing the common contract or its
 deadline.
 
 Fix commits: `fdffd75c88ff94dbf966de61f7c2ae742124ee0f`,
-`a73009a30890d362b3470900d1d7b9ffe7f6170c`
+`a73009a30890d362b3470900d1d7b9ffe7f6170c`,
+`567baecb440fecf8d886002af9636aba0f826f18`
 
 Validation runs: previous evidence is focused FEN stress `30756792254`;
 complete candidates `30757372940` and `30757583507`; post-merge stock test
-`30795667697`; post-merge staticcheck `30795667675`. A new focused FEN
-regression and complete candidate are required.
+`30795667697`; post-merge staticcheck `30795667675`. The new deterministic
+FEN regression and complete corrective candidate still require GitHub Actions
+validation.
 
 ### AUDIT-FEN-004 | BLOCKER | RESOLVED
 
@@ -423,13 +427,13 @@ Fix commit: `19200f7324cdead2027cd329a39cf94aeddc4179`
 Validation runs: pull-request test run `30564186435`; post-merge test run
 `30752070285`.
 
-### AUDIT-KQUEUE-002 | BLOCKER | IN_PROGRESS
+### AUDIT-KQUEUE-002 | BLOCKER | RESOLVED
 
 ID: `AUDIT-KQUEUE-002`
 
 Severity: `BLOCKER`
 
-Status: `IN_PROGRESS`
+Status: `RESOLVED`
 
 Contract: `RC-019`, `RC-020`, `RC-023`, `RC-027`
 
@@ -450,18 +454,18 @@ Decision: Do not increase the stock-test delay. Give kqueue an explicit read
 loop completion signal and make every `Close` caller wait until descriptor
 cleanup and both public channels have reached their terminal state.
 
-Fix commit:
+Fix commit: `c06726c69ce16712ff312b15a8c10bc916bb47a1`
 
-Validation runs: focused kqueue close lifecycle and complete candidate
-required.
+Validation runs: the deterministic kqueue close regression and complete
+corrective candidate still require GitHub Actions validation.
 
-### AUDIT-CI-003 | MAJOR | IN_PROGRESS
+### AUDIT-CI-003 | MAJOR | RESOLVED
 
 ID: `AUDIT-CI-003`
 
 Severity: `MAJOR`
 
-Status: `IN_PROGRESS`
+Status: `RESOLVED`
 
 Contract: `RC-023`, `RC-027`
 
@@ -482,9 +486,10 @@ tag exists. Continue comparing each corrective candidate with its actual pull
 request or push base; do not permit unrelated histories or bypass any file,
 trailer, dependency, formatting, or audit checks.
 
-Fix commit:
+Fix commit: `b58fabe0e091f3af2bfff09b5f570285b930420d`
 
-Validation runs: candidate `policy` and post-merge `policy` required.
+Validation runs: candidate `policy` and post-merge `policy` still require
+GitHub Actions validation.
 
 ### AUDIT-WIN-001 | BLOCKER | RESOLVED
 
