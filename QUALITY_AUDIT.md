@@ -12,8 +12,8 @@ Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
 Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
 Merged fencing candidate: a9b0c5b675aa16c048f450a815fed8d51e882579
-Current audit baseline: fd0580d42cc10219622176c639710e52a369d78d
-Working branch: quality/squash-policy-fix-v1
+Current audit baseline: bcf85a1098ebfd8db6802805464b6886d850917b
+Working branch: quality/backend-audit-v1
 Contract tag: recursive-watch-contract-v1 at 79d2d54222f090711e72a3062821b5a5e8fb520f
 ```
 
@@ -862,6 +862,223 @@ Fix commit: `ci: support squash-merge policy validation`
 
 Validation runs: isolated pull-request and push policy self-tests plus one
 complete candidate run required.
+
+## Backend Audit Coverage
+
+The backend audit compared baseline `bcf85a1` with upstream base `20b1e15`,
+the frozen contract, the common public contract suite, backend-native tests,
+and the platform-exception policy. The review covered every changed recursive
+production path in:
+
+- `backend_inotify.go`: ownership maps, initial and dynamic tree
+  registration, rollback, descriptor removal, pending move expiry, subtree
+  detach and rebase, event filtering, `WatchList`, and `Close`.
+- `backend_windows.go`: IOCP input serialization, physical watch creation,
+  hidden root-parent monitors, provisional state, cancellation and completion
+  ownership, root cleanup, rename handling, `WatchList`, and `Close`.
+- `backend_kqueue.go`: descriptor and path maps, explicit and recursive
+  ownership, initial and dynamic tree registration, rollback, rescan and
+  rename reconciliation, descriptor removal, `WatchList`, and `Close`.
+- `backend_fen.go`: one-shot association and rearm, explicit and recursive
+  ownership, initial and dynamic tree registration, rollback, rename cache,
+  directory reconciliation, dissociation, `WatchList`, and `Close`.
+
+The common contract tests are correctly kept in the public external test
+package and contain no backend type assertions, platform branches, or skips.
+Backend tests are limited to native state, resource, and lifecycle invariants.
+Raw event differences remain isolated in script tests and the machine-checked
+allowlist. The one material placement gap is recorded as `AUDIT-TEST-006`:
+dynamic registration rollback is a common control requirement but is tested
+only for inotify.
+
+The following matrix accounts for every frozen rule and identifies the
+production path that implements it. `native subtree` means that Windows uses
+one recursive `ReadDirectoryChangesW` operation rather than one physical watch
+per descendant.
+
+| Contract | inotify | Windows/IOCP | kqueue | FEN |
+|---|---|---|---|---|
+| `RC-001` | `AddWith`, `register` | `AddWith`, `addWatch` | `AddWith`, `addWatch` | `AddWith`, `addRecursive` |
+| `RC-002` | `AddWith` rollback | validation before `addWatch` commit | `AddWith` rollback | `addRecursive`, `releaseOwner` |
+| `RC-003` | initial `WalkDir` | native subtree | initial `WalkDir` | `addRecursive` |
+| `RC-004` | `registerRecursiveSubtree` | native subtree | `sendCreateIfNew`, `addRecursiveSubdir` | `updateDirectory`, `addRecursiveSubdir` |
+| `RC-005` | `byUser` idempotence | existing inode/mask handling | `hasUserWatch` | `userWatch`, refresh rearm |
+| `RC-006` | `byUser`, `WatchList` | masks plus hidden monitor bit | `byUser`, `WatchList` | `byUser`, `WatchList` |
+| `RC-007` | internal owners excluded | hidden parent monitor excluded | internal paths excluded | owners excluded |
+| `RC-008` | owner sets | masks and root relations | owner sets | owner sets |
+| `RC-009` | owner sets | independent `roots` entries | owner sets | owner sets |
+| `RC-010` | `recursivePath`, `releaseOwner` | `recursivePath`, `remWatch` | `recursivePath`, `Remove` | `recursivePath`, `Remove` |
+| `RC-011` | `releaseOwner` | per-root relation removal | `releaseOwner` | `releaseOwner` |
+| `RC-012` | `handleEvent`, `remove` | hidden parent monitor cleanup | `removePhysical`, `removeRootsUnder` | `dropPhysical` |
+| `RC-013` | pending move plus `rebase` | native subtree path continuity | identity match plus `rebase` | rename cache plus rescan |
+| `RC-014` | pending move expiry, `detachSubtree` | native subtree boundary | `removePhysical` | `dropPhysical` |
+| `RC-015` | `registerRecursiveSubtree` | native subtree | `addRecursiveSubdir` | `addRecursiveSubdir`, `addRenamedSubdir` |
+| `RC-016` | `detachPendingMoveAt` | per-completion operation identity | `seen` plus file identity | `info`, `tracksDirectory` |
+| `RC-017` | registration ledger rollback | provisional rollback | initial rollback only | initial rollback only |
+| `RC-018` | owner release plus descriptor removal | completion drain plus handle close | owner release plus descriptor close | owner release plus dissociation |
+| `RC-019` | shared mutex | IO thread plus state mutex | `opsMu`, `watchMu`, state mutex | `opsMu`, state mutex |
+| `RC-020` | shared close plus `doneResp` | `markClosed`, `closeDone` | shared close plus `doneResp` | shared close plus `doneResp` |
+| `RC-021` | close signal releases channel sends | closed `done` releases channel sends | shared close before wait | notifications sent outside `opsMu` |
+| `RC-022` | owner-filtered native events | mask-filtered native events | rescan synthesis only | queued native notifications only |
+| `RC-023` | common suite | common suite | common suite | common suite |
+| `RC-024` | native script evidence | allowlisted native script evidence | native script evidence | native script evidence |
+| `RC-025` | `releaseOwner`, closed checks | input replies, closed checks | `Remove`, closed checks | `Remove`, closed checks |
+| `RC-026` | `hasPathPrefix` | `hasWindowsPathPrefix` | `hasPathPrefix` | `hasPathPrefix` |
+| `RC-027` | non-recursive owner path | non-recursive mask path | non-recursive owner path | non-recursive owner path |
+
+This accounting found no new inotify control or lifecycle defect. Its dynamic
+registration path records every newly added owner and removes those
+registrations on failure. Full-map scans in inotify and kqueue remain explicit
+performance-baseline subjects; without measurements they are not classified
+as defects. The currently unreachable internal `sendCreate` option is likewise
+not a runtime finding and belongs to the later simplification pass.
+
+### AUDIT-TEST-006 | BLOCKER | OPEN
+
+ID: `AUDIT-TEST-006`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-004`, `RC-015`, `RC-017`, `RC-018`, `RC-023`
+
+Backend: all registration architectures
+
+Finding: The frozen contract requires atomic rollback after partial recursive
+registration, but the shared and backend suites prove this only for the
+initial `Add` call, except for one inotify-only dynamic subtree test. No common
+scenario forces registration of a newly created or moved-in populated subtree
+to fail after at least one descendant has already been registered. The suite
+therefore did not detect that kqueue and FEN retain partial dynamic state, and
+it does not prove that Windows has completed asynchronous rollback before
+`Add` returns after hidden root-monitor setup fails.
+
+Evidence: `TestRecursiveContract/reject_invalid_roots_atomically`;
+`TestRecursiveContractResourceInvariants`; backend initial-Add rollback tests;
+`TestInotifyRecursiveSubtreeRegistrationRollback`; absence of equivalent
+dynamic rollback coverage for IOCP, kqueue, and FEN; `AUDIT-WIN-002`,
+`AUDIT-KQUEUE-003`, and `AUDIT-FEN-007`.
+
+Decision: Add deterministic backend-native failure injection for each native
+resource operation and apply the same pre-call/post-failure state assertions in
+each backend test. Keep the public contract suite backend-independent; do not
+expose a failure hook through the library API. Backend tests must additionally
+inspect pending IOCP operations, descriptors, EventPort associations, owners,
+and internal maps as applicable. Do not use permissions, timing races, sleeps,
+or retries as failure injection.
+
+Fix commit:
+
+Validation runs:
+
+### AUDIT-WIN-002 | BLOCKER | OPEN
+
+ID: `AUDIT-WIN-002`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-002`, `RC-017`, `RC-018`, `RC-023`
+
+Backend: Windows/IOCP
+
+Finding: A newly created recursive root starts an asynchronous
+`ReadDirectoryChangesW` operation before its hidden parent monitor is fully
+validated. If parent-monitor creation or root identity validation then fails,
+`addWatch` restores the logical mask and calls `startRead` to cancel the active
+operation. Cancellation is asynchronous: `startRead` returns immediately while
+the operation remains in `pending`, the watch remains in `watches`, and its
+handle remains open until the I/O thread dequeues the aborted completion. The
+buffered input reply can therefore make public `Add` return before the exact
+pre-call internal and native resource state has been restored.
+
+Evidence: `backend_windows.go`: `addWatch`, `addRecursiveRootMonitor`,
+`rollbackRecursiveRootMonitor`, `startRead`, and the IOCP completion path in
+`readEvents`. `TestWindowsRecursiveAddRollback` rejects invalid roots before
+this asynchronous rollback path and does not inspect it.
+
+Decision: Make failed recursive Add a transaction owned by the I/O thread.
+Delay its reply until every operation created solely by that Add has completed
+cancellation and its watch, handle, root relation, and pending entry have been
+removed. Add deterministic failure injection after the root read starts and
+assert the exact pre-call logical and native resource state before `Add`
+returns.
+
+Fix commit:
+
+Validation runs:
+
+### AUDIT-KQUEUE-003 | BLOCKER | OPEN
+
+ID: `AUDIT-KQUEUE-003`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-004`, `RC-015`, `RC-017`, `RC-018`, `RC-023`
+
+Backend: kqueue
+
+Finding: `addRecursiveSubdir` registers and assigns owners to descendants as
+`WalkDir` progresses, but on a later `WalkDir`, `Info`, open, or kevent
+registration error it returns without releasing any registrations already
+created by that invocation. The caller reports the error while partial path,
+descriptor, owner, directory, and seen state remains live. Initial recursive
+`Add` has a rollback path, so the behavior differs specifically for dynamic
+created or moved-in subtrees.
+
+Evidence: `backend_kqueue.go`: `sendCreateIfNew`, `addRecursiveSubdir`,
+`internalWatch`, and `addWatch`; contrast with rollback in `AddWith` and with
+the registration ledger in inotify's `registerRecursiveSubtree`.
+`TestKqueueRecursiveAddRollback` covers only initial Add.
+
+Decision: Record every owner and physical resource acquired by one dynamic
+subtree registration. On failure, unwind only those acquisitions in reverse
+order while preserving pre-existing and overlapping owners. Return joined
+registration and cleanup errors. Add deterministic mid-tree failure coverage
+for logical maps and open descriptors.
+
+Fix commit:
+
+Validation runs:
+
+### AUDIT-FEN-007 | BLOCKER | OPEN
+
+ID: `AUDIT-FEN-007`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-004`, `RC-015`, `RC-017`, `RC-018`, `RC-023`
+
+Backend: FEN
+
+Finding: `addRecursiveSubdir` and `addRenamedSubdir` associate descendants and
+assign owners incrementally during `WalkDir`. If a later entry fails, both
+functions return without undoing associations, ownership, directory scan state,
+or remembered identity created earlier in that invocation. `updateDirectory`
+queues the error and continues, leaving a partially registered dynamic subtree.
+Initial recursive `Add` calls `releaseOwner` on failure, so the dynamic path has
+different rollback semantics.
+
+Evidence: `backend_fen.go`: `updateDirectory`, `addRecursiveSubdir`,
+`addRenamedSubdir`, `associateOwned`, and `associateFileLocked`; contrast with
+`addRecursive` rollback in `AddWith` and with inotify's registration ledger.
+`TestFenRecursiveAddRollback` covers only initial Add.
+
+Decision: Track all association and ownership mutations made by one dynamic
+tree walk and restore their exact previous state in reverse order on failure.
+Preserve pre-existing owners and associations, return joined registration and
+dissociation errors, and add deterministic mid-tree failure coverage for
+EventPort associations and every logical map.
+
+Fix commit:
+
+Validation runs:
 
 ## Platform Exceptions
 
