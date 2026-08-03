@@ -359,14 +359,17 @@ func (w *fen) addRecursive(name string, with withOpts, rollbackOnError bool) err
 		if root == name && !d.IsDir() {
 			return fmt.Errorf("fsnotify: not a directory: %q", name)
 		}
-		if with.sendCreate && root != name && d.IsDir() {
-			w.sendEvent(Event{Name: root, Op: Create})
-		}
 		stat, err := d.Info()
 		if err != nil {
 			return err
 		}
-		return w.associateOwned(root, stat, root == name, with.op, []string{name}, d.IsDir())
+		if err := w.associateOwned(root, stat, root == name, with.op, []string{name}, d.IsDir()); err != nil {
+			return err
+		}
+		if with.sendCreate && root != name && d.IsDir() {
+			w.sendEvent(Event{Name: root, Op: Create})
+		}
+		return nil
 	})
 	if err != nil {
 		if rollbackOnError {
@@ -423,13 +426,15 @@ func (w *fen) readEvents() {
 			return w.port.Get(pevents, 1, nil)
 		})
 		if err != nil && err != unix.ETIME {
+			// EventPort.Get may return either EBADF or an x/sys wrapper error
+			// when Close races with completion processing. Once the watcher is
+			// closed, neither form is a user-visible read error.
+			if w.isClosed() {
+				return
+			}
 			// Interrupted system call (count should be 0) ignore and continue
 			if errors.Is(err, unix.EINTR) && count == 0 {
 				continue
-			}
-			// Get failed because we called w.Close()
-			if errors.Is(err, unix.EBADF) && w.isClosed() {
-				return
 			}
 			// There was an error not caused by calling w.Close()
 			if !w.sendError(fmt.Errorf("port.Get: %w", err)) {
@@ -583,8 +588,23 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 			if !w.sendEvent(Event{Name: path, Op: Remove}) {
 				return nil
 			}
-			// Don't return the error
+			w.dropPhysical(path, false)
+			return nil
 		}
+	}
+
+	// EventPort associations are one-shot. Rearm before publishing events or
+	// scanning directories so a racing change either queues the next event or
+	// appears in the scan; handling first leaves an unobservable gap.
+	err = w.associateFile(path, stat, isWatched)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Preserve child associations: pending child events still have to clear
+		// their own physical and logical state.
+		w.dropPhysical(path, false)
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	if events&unix.FILE_MODIFIED != 0 {
@@ -607,16 +627,6 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		}
 	}
 
-	if stat != nil {
-		// If we get here, it means we've hit an event above that requires us to
-		// continue watching the file or directory
-		err := w.associateFile(path, stat, isWatched)
-		if errors.Is(err, fs.ErrNotExist) {
-			// Path may have been removed since the stat.
-			err = nil
-		}
-		return err
-	}
 	return nil
 }
 
@@ -657,9 +667,6 @@ func (w *fen) updateDirectory(path string) error {
 
 		if finfo.IsDir() && len(recursiveOwners) > 0 {
 			if w.takeRename(finfo) {
-				if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
-					return nil
-				}
 				if err := w.addRenamedSubdir(entryPath, owners, recursiveOwners); err != nil {
 					if errors.Is(err, fs.ErrNotExist) {
 						continue
@@ -668,10 +675,10 @@ func (w *fen) updateDirectory(path string) error {
 						return nil
 					}
 				}
+				if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
+					return nil
+				}
 				continue
-			}
-			if !w.sendEvent(Event{Name: entryPath, Op: Create}) {
-				return nil
 			}
 			if err := w.addRecursiveSubdir(entryPath, owners, recursiveOwners); err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
@@ -723,11 +730,6 @@ func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []stri
 		if !d.IsDir() {
 			return nil
 		}
-		if path != root {
-			if !w.sendEvent(Event{Name: path, Op: Create}) {
-				return nil
-			}
-		}
 		stat, err := d.Info()
 		if err != nil {
 			return err
@@ -736,7 +738,13 @@ func (w *fen) addRecursiveSubdir(root string, rootOwners, recursiveOwners []stri
 		if path == root {
 			owners = rootOwners
 		}
-		return w.associateOwned(path, stat, false, w.opForOwners(owners), owners, d.IsDir())
+		if err := w.associateOwned(path, stat, false, w.opForOwners(owners), owners, d.IsDir()); err != nil {
+			return err
+		}
+		if !w.sendEvent(Event{Name: path, Op: Create}) {
+			return nil
+		}
+		return nil
 	})
 }
 
