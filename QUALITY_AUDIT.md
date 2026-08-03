@@ -804,21 +804,30 @@ finding globally. This made the required audit-first workflow impossible:
 recording a genuine finding immediately blocked every candidate, including an
 independent fix for that finding.
 
-Evidence: `.github/scripts/check-recursive-policy.sh` before this correction;
-the quality plan requires findings to exist before production changes begin.
+Evidence: `.github/scripts/check-recursive-policy.sh` before the original
+correction; the quality plan requires findings to exist before production
+changes begin. The policy step in pull request 26 accepted four newly recorded
+open blockers, but `test-recursive-policy.sh` then cloned that real candidate
+ledger into every fixture. Its completion-mode success case consequently
+failed on the unrelated real findings instead of testing its own synthetic
+ledger transition.
 
 Decision: Permit unresolved findings during normal incremental audit work. A
 production change must reference a finding that uniquely existed as `OPEN` or
 `IN_PROGRESS` in the event base and must leave it `RESOLVED` in the candidate.
 Unrelated open findings do not block independent work. An explicit
 `AUDIT_REQUIRE_COMPLETE=1` mode remains available for final release gates and
-rejects every unresolved BLOCKER or MAJOR finding.
+rejects every unresolved BLOCKER or MAJOR finding. Every self-test case must
+start from a synthetic clean fixture ledger so current repository findings
+cannot alter the expected result.
 
-Fix commit: `ci: allow incremental recursive audit findings`
+Fix commits: `ci: allow incremental recursive audit findings`;
+`test: isolate policy audit fixtures`
 
-Validation runs: policy self-tests cover open-ledger, valid transition,
-unresolved, same-candidate, already-resolved, independent-finding, and final
-completion cases; one complete pull-request run is required.
+Validation runs: policy self-tests cover source-ledger isolation, open-ledger,
+valid transition, unresolved, same-candidate, already-resolved,
+independent-finding, and final completion cases; one complete pull-request run
+is required.
 
 ### AUDIT-CI-008 | MAJOR | RESOLVED
 

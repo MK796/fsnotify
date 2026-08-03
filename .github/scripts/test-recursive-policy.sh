@@ -14,6 +14,20 @@ new_case() {
 	cd "$case_dir"
 	git config user.name "Recursive policy test"
 	git config user.email "recursive-policy@example.invalid"
+	normalize_fixture_ledger
+}
+
+normalize_fixture_ledger() {
+	if ! grep -Eq '^### AUDIT-.* \| (BLOCKER|MAJOR|MINOR) \| (OPEN|IN_PROGRESS)$' QUALITY_AUDIT.md; then
+		return
+	fi
+
+	# Each case tests only the findings it creates below. Repository findings
+	# must not leak into a completion-mode fixture and change its outcome.
+	sed -i 's/^### \(AUDIT-.* \| \(BLOCKER\|MAJOR\|MINOR\) \| \)\(OPEN\|IN_PROGRESS\)$/### \1RESOLVED/' QUALITY_AUDIT.md
+	sed -i 's/^Status: `\(OPEN\|IN_PROGRESS\)`$/Status: `RESOLVED`/' QUALITY_AUDIT.md
+	git add QUALITY_AUDIT.md
+	git commit -q -m "test fixture: isolate audit ledger"
 }
 
 append_finding() {
@@ -104,6 +118,15 @@ expect_fail() {
 		exit 1
 	fi
 }
+
+# Completion fixtures are independent from unresolved findings in the source
+# repository and from findings created by another case.
+new_case
+append_finding AUDIT-COMMON-899 BLOCKER OPEN
+commit_docs "docs: seed unrelated source finding"
+normalize_fixture_ledger
+base=$(git rev-parse HEAD)
+expect_pass "$base" env AUDIT_REQUIRE_COMPLETE=1
 
 # An unrelated open blocker is legal during incremental audit work.
 new_case
