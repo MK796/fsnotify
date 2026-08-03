@@ -634,6 +634,38 @@ Fix commit: `ci: make staticcheck gate deterministic`
 Validation runs: candidate Staticcheck and policy runs required; complete
 pull-request checks remain required before merge.
 
+### AUDIT-CI-005 | MINOR | RESOLVED
+
+ID: `AUDIT-CI-005`
+
+Severity: `MINOR`
+
+Status: `RESOLVED`
+
+Contract: `RC-027`
+
+Backend: all matrix-backed groups
+
+Finding: Stock matrix jobs inherited a mixture of job IDs and generic `test`
+labels, while the recursive workflow used another inconsistent set of backend
+labels. The Actions UI consequently obscured which evidence belonged to the
+upstream-compatible stock suite and which belonged to the exhaustive recursive
+suite.
+
+Evidence: `.github/workflows/test.yml`;
+`.github/workflows/recursive-backend-integration.yml`; pull request 20.
+
+Decision: Give both workflows and every backend job an explicit `Stock / ...`
+or `Recursive / ...` display name. Preserve all job IDs, matrices, commands,
+dependencies, and the required aggregator names `stock-test-gate`,
+`recursive-contract`, `resource-invariants`, and
+`recursive-backend-integration`.
+
+Fix commit: `ci: clarify backend matrix names`
+
+Validation runs: updated pull-request policy, stock, Staticcheck, and recursive
+backend workflows required.
+
 ## Platform Exceptions
 
 Every platform exception must be represented in

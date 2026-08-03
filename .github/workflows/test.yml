@@ -1,4 +1,4 @@
-name: 'test'
+name: 'Stock backend matrix'
 on:
   pull_request:
   push:
@@ -10,6 +10,7 @@ concurrency:
 
 jobs:
   linux:
+    name: 'Stock / Linux'
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +30,7 @@ jobs:
           FSNOTIFY_DEBUG=1     go test -parallel 1 -race -v ./...
 
   windows:
+    name: 'Stock / Windows'
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +54,7 @@ jobs:
           go test -parallel 1 -race -v ./...
 
   macos:
-    name: 'test'
+    name: 'Stock / macOS'
     strategy:
       fail-fast: false
       matrix:
@@ -75,11 +77,11 @@ jobs:
   # FreeBSD
   freebsd:
     runs-on: 'ubuntu-latest'
-    name:    'test (freebsd)'
+    name:    'Stock / BSD / FreeBSD'
     timeout-minutes: 10
     steps:
       - uses: 'actions/checkout@v6'
-      - name: 'test (openbsd)'
+      - name: 'Run stock suite on FreeBSD'
         id:   'freebsd'
         uses: 'vmactions/freebsd-vm@v1'
         with:
@@ -101,7 +103,7 @@ jobs:
   #       enough.
   openbsd:
     runs-on: 'ubuntu-latest'
-    name:    'test (openbsd)'
+    name:    'Stock / BSD / OpenBSD'
     timeout-minutes: 10
     steps:
       - uses: 'actions/checkout@v6'
@@ -120,7 +122,7 @@ jobs:
   # NetBSD
   netbsd:
     runs-on: 'ubuntu-latest'
-    name:    'test (netbsd)'
+    name:    'Stock / BSD / NetBSD'
     timeout-minutes: 10
     steps:
       - uses: 'actions/checkout@v6'
@@ -140,7 +142,7 @@ jobs:
   # DragonFlyBSD
   dragonflybsd:
     runs-on: 'ubuntu-latest'
-    name:    'test (dragonflybsd)'
+    name:    'Stock / BSD / DragonFlyBSD'
     timeout-minutes: 10
     steps:
       - uses: 'actions/checkout@v6'
@@ -160,7 +162,7 @@ jobs:
   # illumos
   illumos:
     runs-on: 'ubuntu-latest'
-    name:    'test (illumos)'
+    name:    'Stock / illumos (OmniOS)'
     timeout-minutes: 10
     steps:
     - uses: 'actions/checkout@v6'

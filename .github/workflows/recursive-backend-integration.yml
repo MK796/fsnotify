@@ -1,4 +1,4 @@
-name: recursive backend integration
+name: Recursive backend matrix
 
 on:
   pull_request:
@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   linux:
+    name: Recursive / Linux
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -74,6 +75,7 @@ jobs:
         run: go test -race -parallel=1 -timeout=10m ./...
 
   windows:
+    name: Recursive / Windows
     runs-on: windows-latest
     timeout-minutes: 30
     strategy:
@@ -103,6 +105,7 @@ jobs:
           go test -race -v -count=10 -shuffle=on -timeout=6m -run '^TestClose$/(close_while_removing_files|double_close)$' .
 
   macos:
+    name: Recursive / macOS
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -129,6 +132,7 @@ jobs:
           go test -race -v -count=20 -shuffle=on -timeout=10m -run '^TestScript$/watch-recurse' .
 
   freebsd:
+    name: Recursive / BSD / FreeBSD
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -147,6 +151,7 @@ jobs:
             su action -c 'go test -race -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
 
   openbsd:
+    name: Recursive / BSD / OpenBSD
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -164,6 +169,7 @@ jobs:
             su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
 
   netbsd:
+    name: Recursive / BSD / NetBSD
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -181,6 +187,7 @@ jobs:
             su action -c '/usr/pkg/bin/go??? test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
 
   dragonflybsd:
+    name: Recursive / BSD / DragonFlyBSD
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -198,6 +205,7 @@ jobs:
             su action -c 'go test -v -count=10 -shuffle=on -timeout=10m -run "^TestScript$/watch-recurse" .'
 
   illumos:
+    name: Recursive / illumos (OmniOS)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
