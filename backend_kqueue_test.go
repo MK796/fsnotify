@@ -348,7 +348,7 @@ func TestKqueueRebaseDropsRenamedExplicitOwners(t *testing.T) {
 	}
 }
 
-func TestRecursiveAddRollback(t *testing.T) {
+func TestKqueueRecursiveAddRollback(t *testing.T) {
 	tmp := t.TempDir()
 	root := join(tmp, "root")
 	allowed := join(root, "a-allowed")

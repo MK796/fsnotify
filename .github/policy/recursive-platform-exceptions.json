@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "exceptions": [
+    {
+      "id": "RPE-LINUX-CAP-001",
+      "category": "NATIVE_CAPABILITY",
+      "guard": "testdata/watch-recurse/only-write|require|filter",
+      "platforms": ["linux"],
+      "contracts": ["RC-024", "RC-027"],
+      "reason": "Operation filters are an existing optional capability and are currently supported only by the inotify backend.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/only-write"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-001"
+    },
+    {
+      "id": "RPE-WIN-ENV-001",
+      "category": "TEST_ENVIRONMENT",
+      "guard": "fsnotify_test.go|source-marker|RPE-WIN-ENV-001",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "Windows rejects renaming an ancestor while a separately watched descendant keeps an open directory handle; the filesystem operation itself cannot execute in this scenario.",
+      "non_recursive_evidence": ["go:TestNonRecursiveWindowsAncestorRenameBlocked"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-002"
+    },
+    {
+      "id": "RPE-WIN-EVENT-001",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/add-dir|output|fen,kqueue,linux",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "ReadDirectoryChangesW can emit additional Write events for directories when children are created.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-001"
+    },
+    {
+      "id": "RPE-WIN-EVENT-002",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/remove-dir|skip|windows",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "Independent ReadDirectoryChangesW directory watches do not provide one deterministic exact child-event transcript while a directory tree is deleted.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-003"
+    },
+    {
+      "id": "RPE-WIN-EVENT-003",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/remove-dir|output|fen,kqueue,linux",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "ReadDirectoryChangesW can emit additional Write events for directories during tree removal.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-003"
+    },
+    {
+      "id": "RPE-WIN-EVENT-004",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/remove-recursive|output|fen,kqueue,linux",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "ReadDirectoryChangesW can emit additional Write events for directories modified during recursive-watch removal.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-003"
+    },
+    {
+      "id": "RPE-WIN-EVENT-005",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/remove-watched-dir|skip|windows",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "Independent ReadDirectoryChangesW directory watches do not provide one deterministic exact child-event transcript while the watched tree itself is deleted.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-003"
+    },
+    {
+      "id": "RPE-WIN-EVENT-006",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/remove-watched-dir|output|fen,kqueue,linux",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "ReadDirectoryChangesW can emit additional Write events for directories during watched-tree removal.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-003"
+    },
+    {
+      "id": "RPE-WIN-EVENT-007",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/rename-dir|output|windows",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "ReadDirectoryChangesW can emit an additional Write event for the renamed destination directory.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir", "script:testdata/watch-dir/rename-watched-dir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-001"
+    },
+    {
+      "id": "RPE-WIN-EVENT-008",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/rename-prefix|output|windows",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "ReadDirectoryChangesW can emit an additional Write event for the renamed destination directory.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/subdir", "script:testdata/watch-dir/rename-watched-dir"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-001"
+    },
+    {
+      "id": "RPE-WIN-EVENT-009",
+      "category": "NATIVE_EVENT",
+      "guard": "testdata/watch-recurse/rename-to-different-dir|output|windows",
+      "platforms": ["windows"],
+      "contracts": ["RC-024"],
+      "reason": "Independent ReadDirectoryChangesW directory watches represent a cross-directory move as Remove plus Create and do not provide RenamedFrom correlation.",
+      "non_recursive_evidence": ["script:testdata/watch-dir/rename-from-other-watch"],
+      "documentation": ["fsnotify.go"],
+      "audit": "AUDIT-TEST-001"
+    }
+  ]
+}
