@@ -607,15 +607,16 @@ func (w *fen) handleEvent(event *unix.PortEvent) error {
 		return err
 	}
 
-	if events&unix.FILE_MODIFIED != 0 {
-		if fmode.IsDir() && watchedDir {
-			if err := w.updateDirectory(path); err != nil {
-				return err
-			}
-		} else {
-			if !w.sendEvent(Event{Name: path, Op: Write}) {
-				return nil
-			}
+	// A directory association may have been consumed by any non-terminal
+	// event. Reconcile after rearming regardless of the event bit: a child
+	// created during the one-shot gap cannot queue its own directory event.
+	if fmode.IsDir() && watchedDir {
+		if err := w.updateDirectory(path); err != nil {
+			return err
+		}
+	} else if events&unix.FILE_MODIFIED != 0 {
+		if !w.sendEvent(Event{Name: path, Op: Write}) {
+			return nil
 		}
 	}
 	if events&unix.FILE_ATTRIB != 0 && stat != nil {

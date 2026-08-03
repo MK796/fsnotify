@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestRemoveState(t *testing.T) {
@@ -158,6 +160,45 @@ func TestFenRecursiveExistingDescendantCoverage(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForFenPathEvent(t, watcher, path, fen, append([]string{root}, dirs...)...)
+	}
+}
+
+func TestFenRecursiveReconcilesOneShotDirectoryGap(t *testing.T) {
+	root := t.TempDir()
+	dir := join(root, "existing")
+	mkdirAll(t, dir)
+
+	watcher := newWatcher(t, join(root, "..."))
+	defer watcher.Close()
+	fen := watcher.b.(*fen)
+
+	stat, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fen.mu.Lock()
+	err = fen.dissociatePathLocked(dir)
+	fen.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := join(dir, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	errC := make(chan error, 1)
+	go func() {
+		errC <- fen.handleEvent(&unix.PortEvent{
+			Events: unix.FILE_ATTRIB,
+			Path:   dir,
+			Cookie: stat.Mode(),
+		})
+	}()
+	waitForFenPathEvent(t, watcher, sentinel, fen, root, dir, sentinel)
+	if err := <-errC; err != nil {
+		t.Fatal(err)
 	}
 }
 
