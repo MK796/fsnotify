@@ -6,6 +6,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      require_audit_complete:
+        description: Require every BLOCKER and MAJOR audit finding to be closed
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,7 +35,10 @@ jobs:
       - name: Enforce recursive-watch policy
         env:
           POLICY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          AUDIT_REQUIRE_COMPLETE: ${{ github.event_name == 'workflow_dispatch' && inputs.require_audit_complete && '1' || '0' }}
         run: sh .github/scripts/check-recursive-policy.sh
+      - name: Test audit ledger transition policy
+        run: sh .github/scripts/test-recursive-policy.sh
       - name: Validate exception policy
         run: >
           go test -v -count=1
