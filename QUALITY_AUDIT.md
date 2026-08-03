@@ -12,12 +12,14 @@ Historical validated implementation: fce4bab
 Historical reference tag: recursive-watch-validation-v1
 Corrected fencing base: d323a68b31cf4a5043d76f95680777b5fa5f6696
 Merged fencing candidate: a9b0c5b675aa16c048f450a815fed8d51e882579
-Working branch: quality/recursive-watch-v1
-Contract tag: not valid until created on a green main commit
+Current audit baseline: 30551b40f303cbc579a74b45114acb4bfd0b3529
+Working branch: quality/recursive-watch-common-audit-v1
+Contract tag: recursive-watch-contract-v1 at 79d2d54222f090711e72a3062821b5a5e8fb520f
 ```
 
-Production-code auditing starts only after the fencing pull request is merged,
-the contract is validly tagged on `main`, and branch protection is active.
+Production-code auditing started after the Fencing pull request was merged, the
+contract was tagged on `main`, branch protection was activated, and the
+incremental audit-ledger policy was validated on pull request 22.
 
 ## Entry Format
 
@@ -66,13 +68,95 @@ A Recursive Control Contract difference cannot use an `ACCEPTED_*` status.
 
 ## Findings
 
-The systematic production-code audit has not started. Three production
-blockers discovered by the initial Fencing contract run were resolved through
-pull request 17 and independently validated before the Fencing work was
-rebased onto the corrected production base. The first post-merge Fencing runs
-then exposed one remaining FEN observation gap and one asynchronous kqueue
-shutdown gap. The kqueue correction is independently green; the first FEN
-candidate exposed a broader lifecycle-serialization defect recorded below.
+### Common and public API audit coverage
+
+The first line-by-line pass covered `fsnotify.go`, `shared.go`,
+`backend_other.go`, `README.md`, and `CHANGELOG.md` at baseline `30551b4`. The
+implementation was compared with upstream base `20b1e15`, the frozen Recursive
+Control Contract, the common contract suite, and the successful post-merge
+runs `30827555576`, `30827555167`, `30827555608`, and `30827561217`.
+
+Only `fsnotify.go` differs from the upstream base in this scope. `shared.go` and
+`backend_other.go` contain no recursive-specific change. The public exported
+API remains compatible according to the required `api-compatibility` gate.
+The root-specific branch in `hasPathPrefix` is required for filesystem roots
+and is covered by `TestHasPathPrefix`; no change is justified there. Backend
+ownership and lifecycle implementations are explicitly deferred to their
+dedicated inotify, IOCP, kqueue, and FEN audit passes.
+
+This pass produced exactly the two open findings below.
+
+### AUDIT-COMMON-001 | MINOR | OPEN
+
+ID: `AUDIT-COMMON-001`
+
+Severity: `MINOR`
+
+Status: `OPEN`
+
+Contract: `RC-001`, `RC-003`, `RC-004`, `RC-006`, `RC-008`, `RC-009`,
+`RC-010`, `RC-011`
+
+Backend: public documentation
+
+Finding: Public documentation is internally inconsistent and does not fully
+describe the frozen recursive contract. The README still says that
+subdirectories are never watched and that recursion is only on the roadmap.
+The `Watcher.Remove` documentation says that all sub-watches are removed,
+which omits retained overlapping or explicitly owned watches, and it does not
+state clearly that both `root` and `root/...` are equivalent Remove forms. The
+unreleased changelog does not identify the newly public recursive behavior.
+
+Evidence: `README.md` FAQ "Are subdirectories watched?"; `Watcher.Add`,
+`Watcher.Remove`, and `Watcher.WatchList` comments in `fsnotify.go`;
+`CHANGELOG.md`; Recursive Control Contract rules listed above.
+
+Decision: In a separate documentation-only change, make README, Go API
+comments, and the unreleased changelog describe the same marker, dynamic
+coverage, ownership-preserving Remove behavior, equivalent Remove forms, and
+WatchList representation. Do not alter runtime semantics or the frozen
+contract.
+
+Fix commit: pending
+
+Validation runs: pending
+
+### AUDIT-COMMON-002 | MINOR | OPEN
+
+ID: `AUDIT-COMMON-002`
+
+Severity: `MINOR`
+
+Status: `OPEN`
+
+Contract: `RC-001`, `RC-027`
+
+Backend: common path parsing
+
+Finding: `enableRecurse` remains a package-level mutable variable permanently
+initialized to `true`, but no production or test code writes it. Its false
+branch in `recursivePath` is therefore dead code left over from the period when
+recursive support was test-only. It adds an undocumented alternate state to a
+now-unconditional public behavior and unnecessary mutable global state.
+
+Evidence: `fsnotify.go` declarations of `enableRecurse` and `recursivePath`;
+repository-wide reference search finds only the declaration and read.
+
+Decision: In a separate production change, remove the variable and dead branch
+while preserving path cleaning, marker recognition, all public behavior, and
+the complete contract suite.
+
+Fix commit: pending
+
+Validation runs: pending
+
+Before this systematic pass, three production blockers discovered by the
+initial Fencing contract run were resolved through pull request 17 and
+independently validated before the Fencing work was rebased onto the corrected
+production base. The first post-merge Fencing runs then exposed one remaining
+FEN observation gap and one asynchronous kqueue shutdown gap. The kqueue
+correction is independently green; the first FEN candidate exposed a broader
+lifecycle-serialization defect recorded below.
 
 ### AUDIT-TEST-001 | MAJOR | RESOLVED
 
