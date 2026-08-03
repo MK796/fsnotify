@@ -3,10 +3,11 @@
 set -eu
 
 initial_fencing_base=d323a68b31cf4a5043d76f95680777b5fa5f6696
+merged_fencing_base=a9b0c5b675aa16c048f450a815fed8d51e882579
 base=${POLICY_BASE_SHA:-}
 case "$base" in
 	""|0000000000000000000000000000000000000000)
-		base=$initial_fencing_base
+		base=$merged_fencing_base
 		;;
 esac
 if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
@@ -17,9 +18,19 @@ fi
 if contract_tag=$(git rev-parse -q --verify refs/tags/recursive-watch-contract-v1^{commit}) &&
 	git merge-base --is-ancestor "$contract_tag" HEAD; then
 	base=$contract_tag
-elif [ "$base" != "$initial_fencing_base" ]; then
-	echo "policy: initial fencing base is $base; want $initial_fencing_base" >&2
-	exit 1
+else
+	if ! git merge-base --is-ancestor "$initial_fencing_base" "$merged_fencing_base"; then
+		echo "policy: merged fencing base does not descend from the initial fencing base" >&2
+		exit 1
+	fi
+	if ! git merge-base --is-ancestor "$merged_fencing_base" "$base"; then
+		echo "policy: pre-freeze base $base does not descend from merged fencing base $merged_fencing_base" >&2
+		exit 1
+	fi
+	if ! git merge-base --is-ancestor "$base" HEAD; then
+		echo "policy: comparison base $base is not an ancestor of HEAD" >&2
+		exit 1
+	fi
 fi
 
 range="$base..HEAD"
