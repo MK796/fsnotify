@@ -1116,6 +1116,19 @@ func (w *kqueue) dirChange(dir string) error {
 // watching this file.
 func (w *kqueue) sendCreateIfNew(path string, fi os.FileInfo, owners []string) error {
 	isNew := !w.watches.seenBefore(path)
+	if !isNew {
+		current, ok := w.watches.byPath(path)
+		if ok && current.fileInfo != nil && !os.SameFile(current.fileInfo, fi) {
+			// kqueue watches the object behind an open descriptor. A directory
+			// rescan can therefore find a new object at a pathname while the
+			// descriptor still refers to the unlinked object that used to be
+			// there. Its NOTE_DELETE or NOTE_RENAME is already pending; rearming
+			// the stale descriptor with EV_CLEAR here could discard that event.
+			// Let the native event retire the old watch and register the new
+			// object through the normal removal path.
+			return nil
+		}
+	}
 	if isNew && fi.IsDir() && w.watches.isUnderRecurse(path) {
 		recursiveOwners := w.watches.recursiveOwnersFor(path)
 		if oldPath, ok := w.watches.findRenamedDir(path, fi); ok {
