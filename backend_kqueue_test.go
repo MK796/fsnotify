@@ -157,6 +157,120 @@ func TestKqueueInternalDirectoryDoesNotRescan(t *testing.T) {
 	}
 }
 
+func TestKqueueRescanPreservesPendingRemoveForRecreatedPath(t *testing.T) {
+	for _, recursive := range []bool{false, true} {
+		name := "non-recursive"
+		if recursive {
+			name = "recursive"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			path := join(root, "file")
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			events := make(chan Event, 2)
+			errors := make(chan error, 1)
+			kq, closepipe, err := newKqueue()
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := &kqueue{
+				shared:    newShared(events, errors),
+				Events:    events,
+				Errors:    errors,
+				kq:        kq,
+				closepipe: closepipe,
+				doneResp:  make(chan struct{}),
+				watches:   newWatches(),
+			}
+			t.Cleanup(func() {
+				w.watches.mu.RLock()
+				fds := make([]int, 0, len(w.watches.wd))
+				for fd := range w.watches.wd {
+					fds = append(fds, fd)
+				}
+				w.watches.mu.RUnlock()
+				for _, fd := range fds {
+					_ = unix.Close(fd)
+				}
+				_ = unix.Close(w.kq)
+				_ = unix.Close(w.closepipe[0])
+				_ = unix.Close(w.closepipe[1])
+			})
+
+			watchPath := root
+			if recursive {
+				watchPath = join(root, "...")
+			}
+			if err := w.Add(watchPath); err != nil {
+				t.Fatal(err)
+			}
+			original, ok := w.watches.byPath(path)
+			if !ok {
+				t.Fatalf("initial physical watch for %q is missing", path)
+			}
+
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			replacement, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if os.SameFile(original.fileInfo, replacement) {
+				t.Fatal("replacement reused the watched object's identity")
+			}
+
+			if err := w.sendCreateIfNew(path, replacement, w.watches.ownersFor(root)); err != nil {
+				t.Fatal(err)
+			}
+
+			current, ok := w.watches.byPath(path)
+			if !ok {
+				t.Fatalf("pending physical watch for %q is missing", path)
+			}
+			if current.wd != original.wd || !os.SameFile(current.fileInfo, original.fileInfo) {
+				t.Fatal("rescan replaced the descriptor before its native removal event")
+			}
+			if !w.watches.seenBefore(path) {
+				t.Fatal("rescan cleared seen state before the native removal event")
+			}
+			owners := w.watches.ownersFor(path)
+			if len(owners) != 1 || owners[0] != root {
+				t.Fatalf("pending watch owners = %q; want [%q]", owners, root)
+			}
+
+			select {
+			case event := <-events:
+				t.Fatalf("rescan emitted a synthetic event before native removal: %v", event)
+			default:
+			}
+
+			native := make([]unix.Kevent_t, 8)
+			timeout := unix.Timespec{}
+			n, err := unix.Kevent(w.kq, nil, native, &timeout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, event := range native[:n] {
+				if int(event.Ident) == original.wd && uint32(event.Fflags)&unix.NOTE_DELETE != 0 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("native NOTE_DELETE for descriptor %d was cleared during rescan: %v", original.wd, native[:n])
+			}
+		})
+	}
+}
+
 func TestKqueueConcurrentRecursiveLifecycle(t *testing.T) {
 	const (
 		rounds  = 20
