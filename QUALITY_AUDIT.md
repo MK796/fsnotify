@@ -1089,13 +1089,13 @@ Fix commit:
 
 Validation runs:
 
-### AUDIT-KQUEUE-004 | BLOCKER | OPEN
+### AUDIT-KQUEUE-004 | BLOCKER | RESOLVED
 
 ID: `AUDIT-KQUEUE-004`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-004`, `RC-018`, `RC-023`, `RC-024`
 
@@ -1118,14 +1118,58 @@ The failure occurred after ten successful common contract iterations and
 inside the stock repository suite, before the dedicated repeated recursive
 script command.
 
-Decision: Build a deterministic DragonFly BSD reproducer that runs equivalent
-recursive and non-recursive file lifecycles while recording parent rescans,
-physical descriptor replacement, `seen` state, and delivered kevents. Do not
-add sleeps, retries, relaxed event expectations, or a platform exception. If
-the non-recursive path reproduces the loss, classify it under `RC-024` only
-after adding executable non-recursive evidence and documenting the native
-behavior. Otherwise repair the recursive descriptor/state transition and add
-a deterministic regression test.
+Decision: Compare the identity stored with a physical kqueue descriptor against
+the object currently present at that pathname during a directory rescan. If the
+identity changed, leave the old descriptor untouched until its already pending
+native `NOTE_DELETE` or `NOTE_RENAME` is consumed. Do not rearm that stale
+descriptor with `EV_CLEAR`, synthesize replacement events, or introduce a
+platform exception. The deterministic backend regression forces this state for
+both recursive and non-recursive directory watches, verifies that descriptor,
+owner, and `seen` state remain intact, and reads the pending `NOTE_DELETE`
+directly from kqueue without sleeps or retries.
+
+Fix commit: `6357174952f2114a22426dd5bbd60194c343c57c`
+
+Validation runs: pull request 29, corrected candidate run `30927320709`. The
+deterministic regression and integrated repository suite passed on FreeBSD,
+NetBSD, macOS 15 Intel with Go 1.23 and 1.26, and macOS ARM with Go 1.26. The
+run was stopped after the separate `AUDIT-TEST-007` harness failure on macOS
+ARM with Go 1.23; DragonFly validation remains pending.
+
+### AUDIT-TEST-007 | BLOCKER | OPEN
+
+ID: `AUDIT-TEST-007`
+
+Severity: `BLOCKER`
+
+Status: `OPEN`
+
+Contract: `RC-004`, `RC-023`
+
+Backend: shared recursive script harness; observed on macOS/kqueue
+
+Finding: `testdata/watch-recurse/mkdir-p-nested` assumes the fixed 50
+millisecond separator after `mkdir -p` is a recursive-registration readiness
+barrier. It is not. The backend may still be registering the newly discovered
+deepest directory when the script immediately creates its file, so the file
+event can be missed even though every directory event and all later repeated
+recursive script runs succeed. The public contract suite already treats a
+native directory event as insufficient proof of registration and uses bounded
+behavioral probes instead.
+
+Evidence: pull request 29, corrected candidate run `30927320709`, macOS ARM
+with Go 1.23 job `92052882096`. The full repository suite missed only the
+`CREATE /a/b/c/file` event; the same job subsequently passed all 20 dedicated
+recursive script repetitions. The changed kqueue branch is reached only for an
+existing path whose object identity changed, while this script creates every
+path once.
+
+Decision: Replace the script's fixed-delay readiness assumption with a bounded,
+event-driven proof that the newly created subtree is covered before testing the
+next lifecycle operation. Preserve all required directory and file events, do
+not increase sleeps, add blind retries, relax output, or introduce a platform
+exception. Keep this harness correction separate from backend production
+changes.
 
 Fix commit:
 
