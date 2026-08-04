@@ -1130,19 +1130,21 @@ directly from kqueue without sleeps or retries.
 
 Fix commit: `6357174952f2114a22426dd5bbd60194c343c57c`
 
-Validation runs: pull request 29, corrected candidate run `30927320709`. The
-deterministic regression and integrated repository suite passed on FreeBSD,
-NetBSD, macOS 15 Intel with Go 1.23 and 1.26, and macOS ARM with Go 1.26. The
-run was stopped after the separate `AUDIT-TEST-007` harness failure on macOS
-ARM with Go 1.23; DragonFly validation remains pending.
+Validation runs: pull request 29 corrected candidate recursive matrix
+`30927882858`, stock matrix `30927883108`, policy `30927885778`, and
+Staticcheck `30927882835` passed. The recursive matrix passed on every target,
+including DragonFly BSD and OpenBSD. Post-merge recursive matrix `30930764665`,
+stock matrix `30930767270`, policy `30930764713`, and Staticcheck
+`30930764720` passed on squash commit
+`dfd812dc021d8ea5c3623e57a6eead7ad73fe460`.
 
-### AUDIT-TEST-007 | BLOCKER | OPEN
+### AUDIT-TEST-007 | BLOCKER | RESOLVED
 
 ID: `AUDIT-TEST-007`
 
 Severity: `BLOCKER`
 
-Status: `OPEN`
+Status: `RESOLVED`
 
 Contract: `RC-004`, `RC-023`
 
@@ -1164,16 +1166,25 @@ recursive script repetitions. The changed kqueue branch is reached only for an
 existing path whose object identity changed, while this script creates every
 path once.
 
-Decision: Replace the script's fixed-delay readiness assumption with a bounded,
-event-driven proof that the newly created subtree is covered before testing the
-next lifecycle operation. Preserve all required directory and file events, do
-not increase sleeps, add blind retries, relax output, or introduce a platform
-exception. Keep this harness correction separate from backend production
-changes.
+Decision: Add an explicit `await-recurse` script action after `mkdir -p`. It
+creates uniquely named probe files under the new subtree until the collector
+observes an event for that reserved path prefix or the bounded deadline
+expires. Event arrival wakes the action directly; the periodic unique probes
+only handle writes made before registration completed. Before transcript
+comparison, discard events for the reserved probe prefix and remove only the
+`Write` bit which creating a probe can produce for its direct parent directory;
+preserve combined operations and every required directory and user-file event.
+Do not increase a sleep, add a blind command retry, relax output, add a
+platform exception, or change a backend or the frozen contract.
 
-Fix commit:
+Fix commit: `test: make recursive script readiness event-driven`
 
-Validation runs:
+Validation runs: initial pull-request candidate `55d7076` passed policy, API
+compatibility, Staticcheck, and all 17 recursive backend jobs. Both Windows
+stock jobs exposed a test-internal parent-directory `Write` side effect from
+the readiness probe; no backend or contract failure occurred. Complete
+corrected pull-request policy, stock, recursive backend, and Staticcheck
+workflows required.
 
 ## Platform Exceptions
 
