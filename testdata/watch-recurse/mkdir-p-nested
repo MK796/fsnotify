@@ -4,6 +4,7 @@ require recurse
 watch /...
 
 mkdir -p /a/b/c
+await-recurse /a/b/c
 touch /a/b/c/file
 
 Output:

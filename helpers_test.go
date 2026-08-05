@@ -367,10 +367,37 @@ func chmod(t *testing.T, mode fs.FileMode, path ...string) {
 //
 // events := w.stop(t)
 type eventCollector struct {
-	w    *Watcher
-	e    Events
-	mu   sync.Mutex
-	done chan struct{}
+	w         *Watcher
+	e         Events
+	mu        sync.Mutex
+	done      chan struct{}
+	observers []*scriptEventObserver
+}
+
+type scriptEventObserver struct {
+	path       string
+	pathPrefix string
+	parentPath string
+	op         Op
+	capacity   int
+	observed   chan struct{}
+}
+
+type scriptEventObserverKey struct {
+	path string
+	op   Op
+}
+
+func (o *scriptEventObserver) matches(event Event) bool {
+	if o.op != 0 && !event.Has(o.op) {
+		return false
+	}
+
+	name := filepath.Clean(event.Name)
+	if o.path != "" {
+		return name == o.path
+	}
+	return o.pathPrefix != "" && strings.HasPrefix(name, o.pathPrefix)
 }
 
 func newCollector(t *testing.T, add ...string) *eventCollector {
@@ -465,6 +492,69 @@ func (w *eventCollector) events(t *testing.T) Events {
 	return e
 }
 
+func awaitRecursiveCoverage(t *testing.T, observer *scriptEventObserver) {
+	t.Helper()
+
+	const (
+		deadline      = 5 * time.Second
+		probeInterval = 10 * time.Millisecond
+	)
+
+	deadlineTimer := time.NewTimer(deadline)
+	defer deadlineTimer.Stop()
+	probeTimer := time.NewTicker(probeInterval)
+	defer probeTimer.Stop()
+
+	attempts := 0
+	writeProbe := func() {
+		path := fmt.Sprintf("%s%d", observer.pathPrefix, attempts)
+		attempts++
+		if err := os.WriteFile(path, []byte("readiness"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%q): %s", path, err)
+		}
+	}
+	// A directory event does not prove that recursive registration has
+	// completed. Probe unique child paths until one is actually observed.
+	writeProbe()
+
+	for {
+		select {
+		case <-observer.observed:
+			return
+		case <-probeTimer.C:
+			writeProbe()
+		case <-deadlineTimer.C:
+			// Do not lose an event that became observable at the deadline.
+			select {
+			case <-observer.observed:
+				return
+			default:
+			}
+			t.Fatalf("recursive coverage did not become observable after %d probes", attempts)
+		}
+	}
+}
+
+func awaitScriptEvent(t *testing.T, observer *scriptEventObserver) {
+	t.Helper()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-observer.observed:
+		return
+	case <-timer.C:
+		// Do not lose an event that became observable at the deadline.
+		select {
+		case <-observer.observed:
+			return
+		default:
+		}
+		t.Fatalf("did not observe %s for %q", observer.op, observer.path)
+	}
+}
+
 // Start collecting events.
 func (w *eventCollector) collect(t *testing.T) {
 	go func() {
@@ -486,6 +576,15 @@ func (w *eventCollector) collect(t *testing.T) {
 				w.mu.Lock()
 				w.e = append(w.e, e)
 				w.mu.Unlock()
+				for _, observer := range w.observers {
+					if !observer.matches(e) {
+						continue
+					}
+					select {
+					case observer.observed <- struct{}{}:
+					default:
+					}
+				}
 			}
 		}
 	}()
@@ -535,6 +634,36 @@ func (e Events) without(op Op) Events {
 	for _, event := range e {
 		event.Op &^= op
 		if event.Op != 0 {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+func (e Events) withoutRecursiveProbeEvents(observers ...*scriptEventObserver) Events {
+	if len(observers) == 0 {
+		return e
+	}
+
+	filtered := make(Events, 0, len(e))
+	for _, event := range e {
+		ignored := false
+		name := filepath.Clean(event.Name)
+		for _, observer := range observers {
+			if strings.HasPrefix(name, observer.pathPrefix) ||
+				(event.renamedFrom != "" && strings.HasPrefix(filepath.Clean(event.renamedFrom), observer.pathPrefix)) {
+				ignored = true
+				break
+			}
+
+			// Creating a probe can produce a Write event for its parent on
+			// backends which report directory metadata changes. Remove only
+			// that probe side effect and preserve any combined operations.
+			if name == observer.parentPath {
+				event.Op &^= Write
+			}
+		}
+		if !ignored && event.Op != 0 {
 			filtered = append(filtered, event)
 		}
 	}
@@ -801,10 +930,13 @@ func parseScript(t *testing.T, in string) {
 	}
 
 	var (
-		repeat  = 1
-		ignore  Op
-		do      = make([]func(*Watcher), 0, len(cmds))
-		mustArg = func(c command, n int) {
+		repeat                  = 1
+		ignore                  Op
+		eventObservers          []*scriptEventObserver
+		recursiveProbeObservers []*scriptEventObserver
+		awaitEventObservers     = make(map[scriptEventObserverKey]*scriptEventObserver)
+		do                      = make([]func(*Watcher), 0, len(cmds))
+		mustArg                 = func(c command, n int) {
 			if len(c.args) != n {
 				t.Fatalf("line %d: %q requires exactly %d argument (have %d: %q)",
 					c.line, c.cmd, n, len(c.args), c.args)
@@ -1021,6 +1153,52 @@ loop:
 			} else {
 				do = append(do, func(w *Watcher) { mkdir(t, tmppath(tmp, c.args[0])) })
 			}
+		case "await-recurse":
+			mustArg(c, 1)
+			dir := tmppath(tmp, c.args[0])
+			probePrefix := filepath.Join(dir, fmt.Sprintf(".fsnotify-script-readiness-%d-", c.line))
+			observer := &scriptEventObserver{
+				pathPrefix: probePrefix,
+				parentPath: filepath.Clean(dir),
+				capacity:   1,
+			}
+			eventObservers = append(eventObservers, observer)
+			recursiveProbeObservers = append(recursiveProbeObservers, observer)
+			do = append(do, func(w *Watcher) {
+				awaitRecursiveCoverage(t, observer)
+			})
+		case "await-event":
+			mustArg(c, 2)
+			var op Op
+			switch strings.ToLower(c.args[0]) {
+			case "create":
+				op = Create
+			case "write":
+				op = Write
+			case "remove":
+				op = Remove
+			case "rename":
+				op = Rename
+			case "chmod":
+				op = Chmod
+			default:
+				t.Fatalf("line %d: unknown awaited operation: %q", c.line, c.args[0])
+			}
+
+			key := scriptEventObserverKey{
+				path: filepath.Clean(tmppath(tmp, c.args[1])),
+				op:   op,
+			}
+			observer, ok := awaitEventObservers[key]
+			if !ok {
+				observer = &scriptEventObserver{path: key.path, op: key.op}
+				awaitEventObservers[key] = observer
+				eventObservers = append(eventObservers, observer)
+			}
+			observer.capacity++
+			do = append(do, func(w *Watcher) {
+				awaitScriptEvent(t, observer)
+			})
 		case "ln":
 			mustArg(c, 3)
 			if c.args[0] != "-s" {
@@ -1099,12 +1277,16 @@ loop:
 
 	run := func(t *testing.T) {
 		w := newCollector(t)
+		for _, observer := range eventObservers {
+			observer.observed = make(chan struct{}, observer.capacity)
+		}
+		w.observers = eventObservers
 
 		w.collect(t)
 		for _, d := range do {
 			d(w.w)
 		}
-		ev := w.stop(t).without(ignore)
+		ev := w.stop(t).without(ignore).withoutRecursiveProbeEvents(recursiveProbeObservers...)
 		cmpEvents(t, tmp, ev, newEvents(t, want).without(ignore))
 	}
 
