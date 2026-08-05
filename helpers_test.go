@@ -375,9 +375,29 @@ type eventCollector struct {
 }
 
 type scriptEventObserver struct {
+	path       string
 	pathPrefix string
 	parentPath string
+	op         Op
+	capacity   int
 	observed   chan struct{}
+}
+
+type scriptEventObserverKey struct {
+	path string
+	op   Op
+}
+
+func (o *scriptEventObserver) matches(event Event) bool {
+	if o.op != 0 && !event.Has(o.op) {
+		return false
+	}
+
+	name := filepath.Clean(event.Name)
+	if o.path != "" {
+		return name == o.path
+	}
+	return o.pathPrefix != "" && strings.HasPrefix(name, o.pathPrefix)
 }
 
 func newCollector(t *testing.T, add ...string) *eventCollector {
@@ -515,6 +535,26 @@ func awaitRecursiveCoverage(t *testing.T, observer *scriptEventObserver) {
 	}
 }
 
+func awaitScriptEvent(t *testing.T, observer *scriptEventObserver) {
+	t.Helper()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-observer.observed:
+		return
+	case <-timer.C:
+		// Do not lose an event that became observable at the deadline.
+		select {
+		case <-observer.observed:
+			return
+		default:
+		}
+		t.Fatalf("did not observe %s for %q", observer.op, observer.path)
+	}
+}
+
 // Start collecting events.
 func (w *eventCollector) collect(t *testing.T) {
 	go func() {
@@ -536,9 +576,8 @@ func (w *eventCollector) collect(t *testing.T) {
 				w.mu.Lock()
 				w.e = append(w.e, e)
 				w.mu.Unlock()
-				name := filepath.Clean(e.Name)
 				for _, observer := range w.observers {
-					if !strings.HasPrefix(name, observer.pathPrefix) {
+					if !observer.matches(e) {
 						continue
 					}
 					select {
@@ -891,11 +930,13 @@ func parseScript(t *testing.T, in string) {
 	}
 
 	var (
-		repeat         = 1
-		ignore         Op
-		eventObservers []*scriptEventObserver
-		do             = make([]func(*Watcher), 0, len(cmds))
-		mustArg        = func(c command, n int) {
+		repeat                  = 1
+		ignore                  Op
+		eventObservers          []*scriptEventObserver
+		recursiveProbeObservers []*scriptEventObserver
+		awaitEventObservers     = make(map[scriptEventObserverKey]*scriptEventObserver)
+		do                      = make([]func(*Watcher), 0, len(cmds))
+		mustArg                 = func(c command, n int) {
 			if len(c.args) != n {
 				t.Fatalf("line %d: %q requires exactly %d argument (have %d: %q)",
 					c.line, c.cmd, n, len(c.args), c.args)
@@ -1119,10 +1160,44 @@ loop:
 			observer := &scriptEventObserver{
 				pathPrefix: probePrefix,
 				parentPath: filepath.Clean(dir),
+				capacity:   1,
 			}
 			eventObservers = append(eventObservers, observer)
+			recursiveProbeObservers = append(recursiveProbeObservers, observer)
 			do = append(do, func(w *Watcher) {
 				awaitRecursiveCoverage(t, observer)
+			})
+		case "await-event":
+			mustArg(c, 2)
+			var op Op
+			switch strings.ToLower(c.args[0]) {
+			case "create":
+				op = Create
+			case "write":
+				op = Write
+			case "remove":
+				op = Remove
+			case "rename":
+				op = Rename
+			case "chmod":
+				op = Chmod
+			default:
+				t.Fatalf("line %d: unknown awaited operation: %q", c.line, c.args[0])
+			}
+
+			key := scriptEventObserverKey{
+				path: filepath.Clean(tmppath(tmp, c.args[1])),
+				op:   op,
+			}
+			observer, ok := awaitEventObservers[key]
+			if !ok {
+				observer = &scriptEventObserver{path: key.path, op: key.op}
+				awaitEventObservers[key] = observer
+				eventObservers = append(eventObservers, observer)
+			}
+			observer.capacity++
+			do = append(do, func(w *Watcher) {
+				awaitScriptEvent(t, observer)
 			})
 		case "ln":
 			mustArg(c, 3)
@@ -1203,7 +1278,7 @@ loop:
 	run := func(t *testing.T) {
 		w := newCollector(t)
 		for _, observer := range eventObservers {
-			observer.observed = make(chan struct{}, 1)
+			observer.observed = make(chan struct{}, observer.capacity)
 		}
 		w.observers = eventObservers
 
@@ -1211,7 +1286,7 @@ loop:
 		for _, d := range do {
 			d(w.w)
 		}
-		ev := w.stop(t).without(ignore).withoutRecursiveProbeEvents(eventObservers...)
+		ev := w.stop(t).without(ignore).withoutRecursiveProbeEvents(recursiveProbeObservers...)
 		cmpEvents(t, tmp, ev, newEvents(t, want).without(ignore))
 	}
 

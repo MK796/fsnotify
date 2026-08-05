@@ -1111,6 +1111,15 @@ regression. The current evidence does not yet distinguish a recursive kqueue
 descriptor/state race from a pre-existing native non-recursive limitation or
 a script-harness synchronization defect.
 
+The failure recurred in pull-request run `30983783543`, DragonFly BSD job
+`92233813920`, after the production fix and its pull-request and post-merge
+matrices had passed. The job passed all common recursive contract iterations
+before the stock `add-dir` script failed with the same missing second `Remove`.
+The `AUDIT-TEST-007` readiness probe is not used by this script. This recurrence
+shows that the deterministic backend regression covered preservation of a
+pending native delete event, but the script still allowed the next object at
+the same path to overtake observation of the previous object's `Remove`.
+
 Evidence: pull-request run `30850609674`, initial DragonFly BSD job
 `91809431946`, `TestScript/watch-recurse/add-dir`; successful preceding
 baseline job `91768647811`; successful controlled rerun job `91813398424`.
@@ -1128,7 +1137,16 @@ both recursive and non-recursive directory watches, verifies that descriptor,
 owner, and `seen` state remain intact, and reads the pending `NOTE_DELETE`
 directly from kqueue without sleeps or retries.
 
-Fix commit: `6357174952f2114a22426dd5bbd60194c343c57c`
+Follow-up decision: Add a shared `await-event` script action and require one
+observed `Remove` token immediately after each deletion in `add-dir`. Repeated
+waits for the same path and operation share a bounded token queue so one event
+is consumed by exactly one lifecycle barrier. Events remain in the transcript
+and are still compared exactly; a missing event reaches the bounded deadline
+and fails. This adds no retry, sleep, platform branch, output relaxation, or
+backend change.
+
+Fix commits: `6357174952f2114a22426dd5bbd60194c343c57c`;
+`test: synchronize reused-path lifecycle events`
 
 Validation runs: pull request 29 corrected candidate recursive matrix
 `30927882858`, stock matrix `30927883108`, policy `30927885778`, and
@@ -1136,7 +1154,8 @@ Staticcheck `30927882835` passed. The recursive matrix passed on every target,
 including DragonFly BSD and OpenBSD. Post-merge recursive matrix `30930764665`,
 stock matrix `30930767270`, policy `30930764713`, and Staticcheck
 `30930764720` passed on squash commit
-`dfd812dc021d8ea5c3623e57a6eead7ad73fe460`.
+`dfd812dc021d8ea5c3623e57a6eead7ad73fe460`. Follow-up validation is pending
+on pull request 30.
 
 ### AUDIT-TEST-007 | BLOCKER | RESOLVED
 
